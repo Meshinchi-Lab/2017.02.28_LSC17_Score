@@ -1,0 +1,590 @@
+---
+title: 'LSC17 LMR13 and GO Response'
+author: "Jenny Smith"
+date: "April 19, 2018"
+output: html_document
+---
+
+Updated on June 11th 2018. 
+
+Email from Stanley: 
+Thursday, May 3, 2018 at 10:10 AM
+
+The LMR13 scores can be used as a continuous score, but for plots, you are correct that you probably need to split the cohort. For this, the threshold that I trained using adult AML data is percentile = 0.7757576, which works quite well in the testing cohorts that I used for validation (n > 1000). So you can set your threshold to that percentile value of all the scores in your cohort, although it could be that for pediatric, the optimal threshold may need to be different than for adult.
+
+So there was no significant difference in OS, EFS, or RFS for the low LSC17 patient subset between GO vs. noGO? Is it close to significance? I wonder what the P values look like.
+
+slide “Response in LSC17 + CC Genotype Group”: LSC17hi/GO vs. LSC17hi/noGO, what was the P value? Close to significance or not at all?
+Seems like GO benefits the LSC17lo subset more than the LSC17hi group (just like in adult AML)
+
+Last slide: can you get the P values for each GO vs noGO in each plot?
+
+And I agree that it is a good idea to retrain an optimized LSC sub-score using the larger cohort. Looking forward to working together to find an optimal signature for pediatric.
+
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.width = 10, fig.height = 10)
+knitr::opts_knit$set(root.dir = '~/RNA_seq_Analysis/2017.02.28_LSC17_Score/TARGET/LSC17_LMR13_Go')
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(survival)
+library(cmprsk)
+getwd()
+
+```
+
+
+```{r}
+source("~/scripts/RNAseq_Analysis/LSC17_scores/LSC17_Score_Function_10May2017.r")
+source("~/scripts/survival_analysis/Survplot_Functions_2017.03.31.r")
+```
+
+
+```{r}
+LMR13_Score <- function(ExpnData){
+  library(tibble)
+  #expnData is a dataframe with patients IDs are column names and genes as rownames.
+  
+  #subsets and orders expression data frame. 
+  df <- ExpnData[match(LMR13_df$Gene, rownames(ExpnData)), ]
+  
+  if(any(is.na(df))){
+    print("NAs Introduced. Check gene names.")
+  }
+  
+  #linear combination of LSC17 expression. 
+  LMR13_vector <- sapply(df, function(x) sum(x*LMR13_df$Coef)) %>%
+    as.data.frame() %>%
+    rownames_to_column() %>%
+    set_colnames(c("USI","LMR13_Score"))
+  
+  
+  return(LMR13_vector)
+}
+```
+
+
+
+```{r}
+saveMultiPlots.dplyr <- function(dplyr.do,w=8,h=5){
+  #This is for the relapse results from plots with do() command in 
+
+  N <- nrow(dplyr.do)
+  chars <- sapply(dplyr.do,class) == "character"
+  
+  if (sum(chars) == 1){
+    name <- function(i){paste(names(dplyr.do)[1], dplyr.do[[1]][i],col,".tiff", sep="_")}
+  }else{
+    name <- function(i){paste( paste(names(dplyr.do)[chars], collapse = "_"),  paste(dplyr.do[chars][i,], collapse = "_"), col,".tiff", sep="_")}
+  }
+  
+  cols <- colnames(dplyr.do)[!chars] %>% .[. != "compRiskReg"]
+  
+  for (col in cols){
+    # print(col)
+    for (i in 1:N){
+          # print(name(i))
+          tiff(name(i), height = 5, width = 6, units="in", res=600)
+          plot(dplyr.do[[col]][[i]], color = c(1:8), lwd=3, xlab = "Days")
+          dev.off()
+    }
+
+  #   lapply(1:N, function(x) ggsave(filename = name(x),
+  #                                  plot = dplyr.do[[col]][[x]],
+  #                                  device = "tiff",
+  #                                  width = w,
+  #                                  height = h,
+  #                                  dpi=600))
+  # 
+  }
+}
+```
+
+
+
+
+#Read in the Clinical Data
+
+```{r}
+CDE.0531 <- read.csv("~/reference_mapping-files/TARGET_AML_current_asof_june30_2016_UPDATED_CLEAN_4.19.18.csv", 
+                     stringsAsFactors = FALSE)
+
+rownames(CDE.0531) <- CDE.0531$TARGET.USI.1
+CDE.0531$X <- rep("AML", nrow(CDE.0531))
+CDE.0531$rs12459419 <- gsub("NC", NA, CDE.0531$rs12459419)
+
+head(CDE.0531[,1:5])
+```
+
+
+```{r}
+CDE.0531.Go <- CDE.0531 %>% 
+  filter(First.Event != "Induction failure") %>%
+  filter(grepl("GO", GO.Treatment)) %>% 
+  filter(!is.na(rs12459419)) %>%
+  filter(! rs12459419 == "NC") %>%
+  # mutate(First.Event=ifelse(grepl("Death", First.Event), "Death.AnyCause", First.Event)) %>%
+  mutate(GO.Treatment=gsub(" ", "", GO.Treatment)) %>%
+  mutate(GO.SNP=gsub(" ", "", paste(GO.Treatment,rs12459419, sep="."))) %>%
+  mutate(Num.GO.Treatment=as.numeric(as.factor(GO.Treatment))) %>%
+  set_rownames(.$TARGET.USI.1) 
+
+# head(CDE.0531.Go[,1:5])
+dim(CDE.0531.Go)  #810 patients with induction failures included, 736 with induction failures excluded
+```
+
+
+```{r}
+kable(addmargins(xtabs(data=CDE.0531.Go, ~ GO.SNP + First.Event)))
+# write.csv(addmargins(xtabs(data=CDE.0531.Go, ~ GO.SNP + First.Event)), "TARGET_AML_0531_GO.Treatment_CD33.SNP_table.csv")
+```
+
+
+```{r}
+# addmargins(xtabs(data=CDE.0531.Go, ~ GO.SNP + Vital.Status + First.Event))
+```
+
+
+```{r}
+# addmargins(xtabs(data=CDE.0531.Go, ~ GO.SNP + Event.ID))
+```
+
+
+#CD33 Genotypes
+
+Background: 
+
+Purpose Gemtuzumab ozogamicin (GO), a CD33-targeted immunoconjugate, is a re-emerging therapy for acute myeloid leukemia (AML). CD33 single nucleotide polymorphism rs12459419 C>T in the splice enhancer region regulates the expression of an alternatively spliced CD33 isoform lacking exon2 (D2-CD33), thus eliminating the CD33 IgV domain, which is the antibody-binding site for GO, as well as diagnostic immunophenotypic panels. We aimed to determine the impact of the genotype of this splicing polymorphism in patients with AML treated with GO-containing chemotherapy. Patients and Methods CD33 splicing single nucleotide polymorphism was evaluated in newly diagnosed patients with AML randomly assigned to receive standard five-course chemotherapy alone (No-GO arm, n = 408) or chemotherapy with the addition of two doses of GO once during induction and once during intensification (GO arm, n = 408) as per the Children's Oncology Group AAML0531 trial. Results The rs12459419 genotype was CC in 415 patients (51%), CT in 316 patients (39%), and TT in 85 patients (10%), with a minor allele frequency of 30%. The T allele was significantly associated with higher levels of D2-CD33 transcript ( P < 1.0E-6) and with lower diagnostic leukemic cell surface CD33 intensity ( P < 1.0E-6). Patients with the CC genotype had significantly lower relapse risk in the GO arm than in the No-GO arm (26% v 49%; P < .001). However, in patients with the CT or TT genotype, exposure to GO did not influence relapse risk (39% v 40%; P = .85). Disease-free survival was higher in patients with the CC genotype in the GO arm than in the No-GO arm (65% v 46%, respectively; P = .004), but this benefit of GO addition was not seen in patients with the CT or TT genotype. Conclusion Our results suggest that patients with the CC genotype for rs12459419 have a substantial response to GO, making this a potential biomarker for the selection of patients with a likelihood of significant response to GO.
+
+DOI: 10.1200/JCO.2016.71.2513
+
+
+#Examine the Survival/Relapse Risk based only on CD33 SNP and GO Treatment
+
+```{r fig.height=4, fig.width=6, message=FALSE}
+whole.cohort <- KM.plots(df=CDE.0531.Go, groupBy = "X", type = "OS", covariate = "GO.Treatment",cohort = "0531")
+
+whole.cohort$OS[[1]] #no difference
+whole.cohort$EFS[[1]]
+# saveMultiPlots(whole.cohort)
+```
+
+
+```{r fig.width=7, fig.height=7}
+whole.cohort.snp <- KM.plots(df=CDE.0531.Go,
+                             groupBy = "X", 
+                             type = "OS", 
+                             covariate = "rs12459419",
+                             cohort = "0531")
+
+# whole.cohort.snp$OS  #slight difference - not significant.
+# whole.cohort.snp$EFS
+# saveMultiPlots(whole.cohort.snp)
+```
+
+
+```{r fig.height=4, fig.width=6}
+whole.cohort.snp.GO <- KM.plots(df=CDE.0531.Go,
+                             groupBy = "rs12459419", 
+                             type = "OS", 
+                             covariate = "GO.Treatment",
+                             cohort = "0531")
+
+whole.cohort.snp.GO$OS #slightly significant increase in surival in CC + GO treatment group. 
+whole.cohort.snp.GO$EFS #significant increase in EFS in CC + GO treatment (p = 0.015)
+
+# saveMultiPlots(whole.cohort.snp.GO)
+```
+
+
+```{r fig.width=6, fig.height=5}
+cumIncidence <- cuminc(ftime=CDE.0531.Go$Event.Free.Survival.Time.in.Days,
+                       fstatus = CDE.0531.Go$First.Event,
+                       group = CDE.0531.Go$GO.Treatment, 
+                       rho = 0, 
+                       cencode = "Censored")
+
+# tiff("TARGET_AML_0531_GO_RR_CumulativeIncidence_plot.tiff", height = 5, width = 6, units="in", res=600)
+plot(cumIncidence, color = c(1,2,3,4,5,6), lwd=3)
+# dev.off()
+# cumIncidence$Tests
+
+```
+
+
+#Cumulative Incidence in The Whole Cohort groupby SNP 
+
+```{r}
+CDE.0531.Go.IF <- CDE.0531 %>%
+  # filter(First.Event != "Induction failure") %>%
+  filter(grepl("GO", GO.Treatment)) %>%
+  filter(!is.na(rs12459419)) %>%
+  filter(! rs12459419 == "NC") %>%
+  # mutate(First.Event=ifelse(grepl("Death", First.Event), "Death.AnyCause", First.Event)) %>%
+  mutate(GO.Treatment=gsub(" ", "", GO.Treatment)) %>%
+  mutate(GO.SNP=gsub(" ", "", paste(GO.Treatment,rs12459419, sep="."))) %>%
+  mutate(Num.GO.Treatment=as.numeric(as.factor(GO.Treatment))) %>%
+  set_rownames(.$TARGET.USI.1)
+
+# head(CDE.0531.Go[,1:5])
+dim(CDE.0531.Go.IF) 
+```
+
+```{r}
+cumIncGO_IF <- CDE.0531.Go.IF %>%
+  group_by(rs12459419) %>%
+  do(cumIncidence=cuminc(ftime=.$Event.Free.Survival.Time.in.Days, 
+                         fstatus=.$First.Event,
+                         group=.$GO.Treatment,
+                         rho=0,
+                         cencode = "Censored"), 
+     compRiskReg=crr(ftime = .$Event.Free.Survival.Time.in.Days, 
+                  fstatus= .$First.Event,
+                  cov1 = matrix(.$Num.GO.Treatment, dimnames = list(NULL,"GO.Trt")), 
+                  failcode = "Relapse", 
+                  cengroup = "Censored"))
+
+# saveMultiPlots.dplyr(cumIncGO)
+cumIncGO_IF
+
+plot(cumIncGO_IF$cumIncidence[[1]], color=c(1:8), lwd=3,  xlab = "Days") #CC geno
+plot(cumIncGO_IF$cumIncidence[[2]], color=c(1:8), lwd=3,  xlab = "Days") #TT geno 
+plot(cumIncGO_IF$cumIncidence[[3]], color=c(1:8), lwd=3,  xlab = "Days") #TC geno
+
+```
+
+
+```{r}
+cumIncGO <- CDE.0531.Go %>%
+  group_by(rs12459419) %>%
+  do(cumIncidence=cuminc(ftime=.$Event.Free.Survival.Time.in.Days, 
+                         fstatus=.$First.Event,
+                         group=.$GO.Treatment,
+                         rho=0,
+                         cencode = "Censored"), 
+     compRiskReg=crr(ftime = .$Event.Free.Survival.Time.in.Days, 
+                  fstatus= .$First.Event,
+                  cov1 = matrix(.$Num.GO.Treatment, dimnames = list(NULL,"GO.Trt")), 
+                  failcode = "Relapse", 
+                  cengroup = "Censored"))
+
+# saveMultiPlots.dplyr(cumIncGO)
+cumIncGO
+```
+
+```{r}
+table(CDE.0531.Go$First.Event, CDE.0531.Go$CR.status.at.end.of.course.2)
+```
+
+
+```{r}
+# lapply(cumIncGO$compRiskReg, summary)
+```
+
+
+```{r fig.height=5, fig.width=5}
+plot(cumIncGO$cumIncidence[[1]], color=c(1:6), lwd=3,  xlab = "Days") #CC geno
+plot(cumIncGO$cumIncidence[[2]], color=c(1:6), lwd=3,  xlab = "Days") #TT geno 
+plot(cumIncGO$cumIncidence[[3]], color=c(1:6), lwd=3,  xlab = "Days") #TC geno
+cumIncGO$cumIncidence[[1]]$Tests
+```
+
+
+#Read in the expression data
+
+```{r}
+RPKM <- read.csv("~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_AAML0531_dupGenesRemoved_RPKM.csv",
+                 stringsAsFactors = FALSE, row.names = 1)
+```
+
+```{r}
+# head(RPKM[,1:5])
+```
+
+```{r}
+log2.RPKM <- log2(RPKM+1)
+
+# head(log2.RPKM[,1:5])
+```
+
+
+#LSC17 Groups 
+
+```{r}
+CDE.0531.Go.LSC <- LSC17Groups(clinData = CDE.0531.Go, ExpnData = log2.RPKM)
+```
+
+```{r}
+table(CDE.0531.Go.LSC$LSC17_Group)
+```
+
+#LSC3 Groups 
+
+```{r}
+CDE.0531.Go.LSC <- LSC3Groups(clinData = CDE.0531.Go.LSC, ExpnData = log2.RPKM)
+```
+
+```{r}
+table(CDE.0531.Go.LSC$LSC3_Group)
+```
+
+```{r}
+# table(CDE.0531.Go.LSC$GO.Treatment, CDE.0531.Go.LSC$LSC17_Group)
+```
+
+ 
+#LMR13 Groups 
+
+```{r}
+LMR13_df <- read.csv("~/RNA_seq_Analysis/2017.02.28_LSC17_Score/TARGET/LSC17_LMR13_Go/LMR13_df.csv")
+LMR13_df$Gene <- gsub("LOC284422", "C19orf77", LMR13_df$Gene)
+# LMR13_df
+```
+
+```{r}
+sum(LMR13_df$Gene %in% rownames(log2.RPKM))
+```
+
+
+```{r}
+CDE.0531.Go.LSC <- CDE.0531.Go.LSC %>%
+  inner_join(., LMR13_Score(log2.RPKM), by=c("TARGET.USI.1"="USI")) %>%
+  mutate(LMR13_Group=ifelse(LMR13_Score >= median(LMR13_Score), "high", "low")) %>% 
+  mutate(GO.SNP.LSC17=paste(GO.SNP, LSC17_Group,sep=".")) %>%
+  mutate(GO.LSC17=paste(GO.Treatment, LSC17_Group, sep=".")) %>%
+  mutate(Num.GO.LSC17=as.numeric(as.factor(GO.LSC17)))
+
+as.data.frame(table(CDE.0531.Go.LSC$GO.SNP.LSC17))
+# dim(CDE.0531.Go.LSC) #364 patients by 44 cols
+```
+
+
+
+#Examine LSC17 Groups on RR 
+
+
+
+```{r fig.height=5, fig.width=6}
+cumIncLSC17 <- cuminc(ftime=CDE.0531.Go.LSC$Event.Free.Survival.Time.in.Days, 
+                     fstatus=CDE.0531.Go.LSC$First.Event, 
+                     group=CDE.0531.Go.LSC$LSC17_Group, 
+                     rho=0,
+                     cencode="Censored")
+
+# tiff("TARGET_AML_0531_LSC17_RR_CumulativeIncidence_plot.tiff", height = 5, width = 6, units="in", res=600)
+plot(cumIncLSC17, color = c(1,2,3,4,5,6), lwd=3)
+# dev.off()
+```
+
+
+```{r}
+cumIncLSC17$Tests #LSC17 high group has a significantly higher risk of relapse
+```
+
+
+```{r}
+cumIncLSC17.GO <- CDE.0531.Go.LSC %>%
+  group_by(LSC17_Group) %>% 
+  filter(First.Event != "Induction failure") %>%
+  do(cumIncidence=cuminc(ftime=.$Event.Free.Survival.Time.in.Days, 
+                         fstatus=.$First.Event,
+                         group=.$GO.LSC17,
+                         rho=0,
+                         cencode = "Censored"),
+    compRiskReg=crr(ftime = .$Event.Free.Survival.Time.in.Days, 
+                  fstatus= .$First.Event,
+                  cov1 = matrix(.$Num.GO.LSC17, dimnames = list(NULL,"GO.Trt.LSC17")), 
+                  failcode = "Relapse", 
+                  cengroup = "Censored"))
+
+cumIncLSC17.GO
+# table(CDE.0531.Go.LSC$GO.LSC17)
+
+# saveMultiPlots.dplyr(cumIncLSC17.GO)
+```
+
+```{r}
+# cumIncLSC17.GO$cumIncidence[[1]]$Tests #High
+# cumIncLSC17.GO$cumIncidence[[2]]$Tests #Low, Death p=0.13, relapse p=0.15
+# lapply(cumIncLSC17.GO$compRiskReg, summary)
+```
+
+
+```{r fig.height=5, fig.width=6}
+plot(cumIncLSC17.GO$cumIncidence[[1]], color = c(1:6), lwd=3, xlab = "Days") #High LSC17
+plot(cumIncLSC17.GO$cumIncidence[[2]], color = c(1:6), lwd=3,  xlab = "Days") #Low LSC17 
+
+# cumIncLSC17.GO$cumIncidence[[2]]$Tests
+```
+
+
+```{r}
+cumIncLSC17.GO.SNP <- CDE.0531.Go.LSC %>%
+  group_by(rs12459419,LSC17_Group) %>% 
+  filter(First.Event != "Induction failure") %>%
+  do(cumIncidence=cuminc(ftime=.$Event.Free.Survival.Time.in.Days, 
+                         fstatus=.$First.Event,
+                         group=.$GO.LSC17,
+                         rho=0,
+                         cencode = "Censored"),
+    compRiskReg=crr(ftime = .$Event.Free.Survival.Time.in.Days, 
+                  fstatus= .$First.Event,
+                  cov1 = matrix(.$Num.GO.LSC17, dimnames = list(NULL,"GO.Trt.LSC17")), 
+                  failcode = "Relapse", 
+                  cengroup = "Censored"))
+
+cumIncLSC17.GO.SNP
+names(cumIncLSC17.GO.SNP$cumIncidence) <- paste(cumIncLSC17.GO.SNP$rs12459419, cumIncLSC17.GO.SNP$LSC17_Group, sep="_")
+# lapply(cumIncLSC17.GO.SNP$compRiskReg,summary)
+# saveMultiPlots.dplyr(cumIncLSC17.GO.SNP)
+```
+
+```{r fig.height=5, fig.width=6}
+plot(cumIncLSC17.GO.SNP$cumIncidence$TC_low, color = c(1:6), lwd=3, xlab = "Days") 
+plot(cumIncLSC17.GO.SNP$cumIncidence$TC_high, color = c(1:6), lwd=3,  xlab = "Days") 
+ 
+summary(cumIncLSC17.GO.SNP$compRiskReg[[2]])
+cumIncLSC17.GO.SNP$cumIncidence[[2]]$Tests
+```
+
+
+```{r fig.height=5, fig.width=6}
+plot(cumIncLSC17.GO.SNP$cumIncidence$T_low, color = c(1:4), lwd=3,  xlab = "Days")
+plot(cumIncLSC17.GO.SNP$cumIncidence$T_high, color = c(1:4), lwd=3,  xlab = "Days")
+```
+
+```{r fig.height=5, fig.width=6}
+plot(cumIncLSC17.GO.SNP$cumIncidence$C_low, color = c(1:8), lwd=3,  xlab = "Days")
+plot(cumIncLSC17.GO.SNP$cumIncidence$C_high, color = c(1:8), lwd=3,  xlab = "Days")
+```
+
+```{r}
+cumIncLSC17.GO.SNP$cumIncidence$C_low$Tests
+cumIncLSC17.GO.SNP$cumIncidence$C_high$Tests
+```
+
+
+```{r}
+cumIncLSC17.GO.SNP$cumIncidence[[1]]$`GO.high Relapse`
+cumIncLSC17.GO.SNP$cumIncidence[[1]]$`NOGO.high Relapse`
+cumIncLSC17.GO.SNP$cumIncidence[[2]]$`GO.low Relapse`
+cumIncLSC17.GO.SNP$cumIncidence[[2]]$`NOGO.low Relapse`
+```
+
+```{r}
+# tiff("TARGET_AML_1031_GO_LSC17_CumInc_Relapse.tiff", height = 10, width = 10, units="in", res=600)
+par(lwd=3, cex=1.5)
+plot(x=cumIncLSC17.GO.SNP$cumIncidence[[1]]$`GO.high Relapse`$time, 
+     y=cumIncLSC17.GO.SNP$cumIncidence[[1]]$`GO.high Relapse`$est,
+     ylim = c(0,1.0),xlim=c(0,3500), type="l", col="red", xlab = "Days", ylab="Probability",
+     main="Relapse Risk in AAML1031, CC Genotype Only")
+lines(x= cumIncLSC17.GO.SNP$cumIncidence[[2]]$`GO.low Relapse`$time, 
+      y=cumIncLSC17.GO.SNP$cumIncidence[[2]]$`GO.low Relapse`$est, col="blue")
+lines(x = cumIncLSC17.GO.SNP$cumIncidence[[1]]$`NOGO.high Relapse`$time, 
+      y=cumIncLSC17.GO.SNP$cumIncidence[[1]]$`NOGO.high Relapse`$est, col="orange2") 
+lines(x=cumIncLSC17.GO.SNP$cumIncidence[[2]]$`NOGO.low Relapse`$time, 
+      y=cumIncLSC17.GO.SNP$cumIncidence[[2]]$`NOGO.low Relapse`$est, col="black") 
+legend(x=150, y=1.0, c("GOHigh LSC17","GO.Low LSC17","NOGO.High LSC17","NOGO.Low LSC17"),
+        fill=c("red","blue","orange2","black"), border="grey")
+  
+# dev.off()  
+```
+
+
+#Association of LSC17 and GO Exposure to Survival 
+
+```{r}
+CDE.0531.Go.LSC %>% 
+  # group_by(rs12459419, GO.Treatment) %>%
+  # group_by_(c("GO.Treatment")) %>%
+  # group_by_at(vars(c("rs12459419","GO.Treatment"))) %>%
+  group_by_at(vars(c("GO.Treatment"))) %>%
+  summarise(median=median(Age.at.Diagnosis.in.Days))
+```
+
+
+```{r}
+KM.LSC17_Groups <- CDE.0531.Go.LSC %>% 
+  group_by(LSC17_Group) %>%
+  do(KM=KM.plots(df=.,
+                      groupBy = "rs12459419", 
+                      type = "OS", 
+                      covariate = "GO.Treatment",
+                      cohort = "0531"))
+
+names(KM.LSC17_Groups$KM) <- unlist(KM.LSC17_Groups$LSC17_Group)
+KM.LSC17_Groups
+```
+
+```{r fig.width=7, fig.height=5}
+# KM.LSC17_Groups$KM$low$OS
+KM.LSC17_Groups$KM$low$EFS
+KM.LSC17_Groups$KM$high$EFS
+```
+
+
+
+#Cox Models for the EFS and OS
+
+```{r}
+OS <- Surv(CDE.0531.Go.LSC$Overall.Survival.Time.in.Days, CDE.0531.Go.LSC$OS.ID)
+EFS <- Surv(CDE.0531.Go.LSC$Event.Free.Survival.Time.in.Days, CDE.0531.Go.LSC$Event.ID)
+```
+
+so random thought, is the pasted column (GO.SNP.LSC17) the same as an interaction term in the model? 
+
+```{r}
+CDE.0531.Go.LSC <- CDE.0531.Go.LSC %>%
+  mutate(LSC17_Group=factor(LSC17_Group, levels = c("low","high"))) %>%
+  mutate(rs12459419 = factor(rs12459419, levels=c("TC","T","C"))) %>%
+  mutate(GO.Treatment=factor(GO.Treatment, levels=c("NOGO","GO")))
+```
+
+```{r}
+cox.1 <- coxph(EFS ~ LSC17_Group +  rs12459419 + GO.Treatment, data = CDE.0531.GO.LSC)
+
+summary(cox.1)
+```
+
+```{r}
+cox.2 <- coxph(EFS ~ LSC17_Group + GO.Treatment, data = CDE.0531.GO.LSC)
+
+summary(cox.2)
+```
+
+
+```{r}
+cox.3 <- coxph(EFS ~ LSC17_Group * rs12459419 + GO.Treatment, data = CDE.0531.GO.LSC)
+
+summary(cox.3)
+```
+
+
+
+
+
+
+#Session Information 
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+

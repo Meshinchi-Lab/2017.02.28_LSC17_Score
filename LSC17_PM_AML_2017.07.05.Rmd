@@ -1,0 +1,451 @@
+---
+title: "LSC17_PM_AML.Rmd"
+output: html_document
+---
+
+
+
+
+Jenny Smith 
+March 16, 2017 
+Updated: Nov. 17,2017
+
+Purpose: To determine the level of stemmness for Princess Margarette Adult AML cohort (GSE76004). 
+
+References: Nature. 2016 Dec 15;540(7633):433-437. doi: 10.1038/nature20598.
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE, fig.align='center')
+knitr::opts_knit$set(root.dir = '~/RNA_seq_Analysis/2017.02.28_LSC17_Score/PM/')
+```
+
+
+```{r message = FALSE}
+library(EnsDb.Hsapiens.v79)
+library(survival)
+library(RColorBrewer)
+library(colorspace)
+library(stringr)
+library(GEOquery)
+library(Biobase)
+library(dplyr)
+library(ggplot2)
+getwd()
+```
+
+
+#Prepare the LSC17 Gene Signature Calulations and survival plot functions
+
+```{r message=FALSE}
+source("~/scripts/RNAseq_Analysis/LSC17_scores/LSC17_Score_Function_10May2017.r")
+source("~/scripts/survival_analysis/Survplot_Functions_2017.03.31.r")
+```
+
+
+#Access the GEO Data 
+```{r}
+#Add something for if this file already exists.
+# GSE76004 <- getGEO("GSE76004", destdir = ".")
+GSE76004 <- getGEO(filename = "GSE76004_series_matrix.txt.gz")
+```
+
+
+```{r}
+names(GSE76004)
+```
+
+
+#Access Feature data from the GEO series. 
+```{r}
+# featureData <- fData(GSE76004[[1]])
+featureData <- fData(GSE76004)
+head(featureData)
+
+```
+
+```{r}
+dim(featureData) #31 by 4 rows
+```
+
+
+#Access Expression Data from the the GEO Series. 
+
+```{r}
+# nanoString <- as.data.frame(exprs(GSE76004[[1]]))
+nanoString <- as.data.frame(exprs(GSE76004))
+
+
+head(nanoString[,1:10])
+```
+
+```{r}
+dim(nanoString ) #31 by 37 cols
+```
+
+```{r}
+nanoString <- merge(featureData[,1:2], nanoString, by.x = "ID", by.y = 0)
+
+head(nanoString[,1:10])
+```
+
+```{r}
+#Keep only rows with an official gene symbol. The others are controls
+nanoString <- nanoString[grep("^[A-Z].+", nanoString$ORF), ] 
+
+#rownames are genes
+rownames(nanoString) <- nanoString$ORF
+nanoString <- nanoString[,3:ncol(nanoString)]
+
+head(nanoString)
+```
+
+
+```{r}
+dim(nanoString)
+```
+
+```{r}
+sapply(nanoString[,1:5], FUN = class)
+```
+
+
+#Distribution of the Expression 
+
+```{r}
+colors <- rainbow_hcl(17)
+par(pty="m", las=2, mar=c(5,4,5,2))
+boxplot(t(nanoString), col=colors, cex.axis = 0.85, ylim=c(0,14))
+title(main = "Distribution of Gene Expression for LSC17 Genes \n in PM-AML Cohort", line=2.0, cex.main = 0.8, ylab = "Log2 GE", cex.lab=0.75)
+
+```
+
+
+#Prepare the Clinical Data
+
+```{r}
+phenoData <- pData(phenoData(GSE76004))
+
+head(phenoData)
+```
+
+
+```{r}
+unique(phenoData$data_processing)
+```
+
+
+```{r}
+clinData <- data.frame(phenoData$title, 
+                       phenoData$geo_accession, 
+                       dplyr::select(phenoData, contains("characteristics")))
+                       
+head(clinData)
+# dim(clinData) #307 by 15 
+```
+
+
+```{r}
+#From the Phenotype data
+clinNames <- c("title", "GEO_Accession", "Sex", "Age_years", 
+                "AML_Type", "FAB_Group", "WBC", "BM_Blast%", "cytogenetics", "cytogenetic_risk", "NPM1C",
+               "FLT3-ITD", "FLT3-tKD", "OS_Days", "Vital_status")
+
+length(clinNames)
+```
+
+
+```{r}
+colnames(clinData) <- clinNames
+```
+
+Remove the extra character strings from each column
+```{r}
+clinData$Sex <- gsub("Sex:", "", clinData$Sex)
+clinData$Age_years <- gsub("age:", "", clinData$Age_years)
+clinData$AML_Type <- gsub("aml type:", "", clinData$AML_Type)
+clinData$FAB_Group <- gsub("fab:", "", clinData$FAB_Group)
+clinData$WBC <- gsub("wbc:", "", clinData$WBC)
+clinData$cytogenetics <- gsub("cytogenetics:", "", clinData$cytogenetics)
+clinData$`BM_Blast%` <- gsub("bm blast %:", "", clinData$`BM_Blast%`) 
+clinData$cytogenetic_risk <- gsub("cytogenetic risk:", "", clinData$cytogenetic_risk)
+clinData$NPM1C <- gsub("npm1c:", "", clinData$NPM1C)
+clinData$`FLT3-ITD` <- gsub("flt3-itd:", "", clinData$`FLT3-ITD`)
+clinData$`FLT3-tKD` <- gsub("flt3-tkd:", "", clinData$`FLT3-tKD`)
+clinData$OS_Days <- gsub("os \\(as of june 8 2015\\): ", "", clinData$OS_Days)
+clinData$Vital_status <- gsub("os event \\(as of june 8 2015\\): ", "", clinData$Vital_status)
+```
+
+
+Make the character vector for vital status to be numeric. 
+```{r}
+clinData$Vital_status <- ifelse(clinData$Vital_status == "Alive", 0, 1)
+```
+
+Ensure the OS_Days is a numeric class
+```{r}
+clinData$OS_Days <- as.numeric(as.character(clinData$OS_Days))
+clinData$Age_years <- as.numeric(as.character(clinData$Age_years))
+```
+
+Create column for OS in years
+```{r}
+clinData$OS_years <- (clinData$OS_Days/365)
+```
+
+
+Make rownames to be the patient ID
+```{r}
+rownames(clinData) <- gsub("AML ", "", clinData$title)
+```
+
+
+```{r}
+head(clinData)
+
+# write.csv(clinData, file = "PM_AML_trainingSet_clinData.csv")
+```
+
+
+```{r}
+unique(clinData$AML_Type)
+```
+
+```{r}
+length(clinData$AML_Type[which(clinData$AML_Type == " secondary")]) #26 seconday AMLs
+length(clinData$AML_Type[which(clinData$AML_Type == " therapy-related")]) #13 therapy related. 
+```
+
+
+#Summary Stats on the Clinical Data
+
+```{r}
+range(clinData$Age_years)
+median(clinData$Age_years)
+```
+
+
+```{r}
+# class(clinData$clinData.Age.at.Diagnosis.in.Days)
+nrow(clinData[which(clinData$Age_years == 52), ])
+```
+
+
+```{r}
+length(which(clinData$Vital_status == 0)) #102 survived to end of study
+length(which(clinData$Vital_status == 1)) #205 did not survive to 14 years
+``` 
+
+
+
+#Calculate the LSC17 Scores and Create Groups column in the clinical Data
+
+```{r}
+identical(as.character(clinData$GEO_Accession), colnames(nanoString)) #same order
+```
+
+#For All Patients. 
+```{r}
+#column Names must be changed from GSM# to the Patient ID
+rownames(clinData) <- colnames(nanoString)
+
+head(nanoString[,1:5])
+head(clinData[,1:5])
+```
+
+
+
+```{r}
+PM_SurvData <- LSC17Groups(clinData = clinData, 
+                           ExpnData = nanoString)
+
+PM_SurvData <- LSC3Groups(clinData = PM_SurvData,
+                          ExpnData = nanoString)
+
+head(PM_SurvData)
+# save(PM_SurvData, file = "PM_AML_LSC17_SurvivalData_12.02.17.RData")
+# write.csv(PM_SurvData, file="PM_AML_LSC17_SurvivalData_12.02.17")
+```
+
+
+#Waterfall plots 
+
+```{r}
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/ggplot_Themes_Function.r")
+```
+
+```{r}
+# tiff("PM_LSC17_Scores_waterfallplot.tiff", height = 5, width = 7, units = "in", res = 600)
+ggplot(PM_SurvData, aes(x=reorder(PM_SurvData$GEO_Accession,PM_SurvData$LSC17_Score), y=LSC17_Score, fill=LSC17_Group)) + 
+  geom_bar(stat="identity") + 
+  theme_JS + 
+  theme(axis.text.x =  element_blank(),
+        axis.ticks.x = element_blank()) +
+  labs(x="Patient")
+# dev.off()
+```
+
+
+#Create LSC17 Groups for Low/High Age Patients
+
+```{r}
+range(clinData$Age_years)
+median(clinData$Age_years)
+```
+
+```{r}
+#subset the clindata
+clinData_AgeLow <- clinData[clinData$Age_years <= 60, ]  #use age 60
+
+head(clinData_AgeLow)
+dim(clinData_AgeLow) #223
+```
+
+
+```{r}
+#Subset the clinical Data
+clinData_AgeHigh <- clinData[as.numeric(as.character(clinData$Age_years)) >= 60, ]
+
+head(clinData_AgeHigh)
+dim(clinData_AgeHigh) #90 patients
+```
+
+http://www.hematology.org/Thehematologist/Ask/3615.aspx
+The median age at diagnosis is 67 years, and more than 60 percent of newly diagnosed patients are older than 60 years.2
+
+
+```{r}
+PM_SurvData_AgeGroups <- lapply(list(clinData_AgeLow, clinData_AgeHigh), LSC17Groups, ExpnData=nanoString)
+PM_SurvData_AgeGroups <- lapply(PM_SurvData_AgeGroups, LSC3Groups, ExpnData=nanoString)
+
+names(PM_SurvData_AgeGroups) <- c("low", "high")
+
+lapply(PM_SurvData_AgeGroups, head)
+```
+
+
+#Survival Analysis with Kaplan-Meier Curves
+
+```{r}
+PM_SurvData <- read.csv("PM_AML_LSC17_SurvivalData_12.02.17.csv", stringsAsFactors = FALSE, row.names = 1)
+
+head(PM_SurvData)
+```
+
+
+#OS
+
+```{r}
+OS <- SurvObjects(PM_SurvData, 
+                  colNames = c("OS_years", "Vital_status"), 
+                  group="LSC17_Group")
+# OS[[1]]
+
+OS
+summary(OS$CoxPH)
+```
+
+
+```{r}
+OS.qt <- SurvObjects(PM_SurvData, 
+                  colNames = c("OS_years", "Vital_status"), 
+                  group="LSC17_Quantile")
+
+OS.qt[[1]]
+```
+
+```{r}
+OS.agelow <- SurvObjects(PM_SurvData_AgeGroups$low, 
+                  colNames = c("OS_years", "Vital_status"), 
+                  group="LSC17_Group")
+OS.agelow[[1]]
+```
+
+
+
+```{r}
+OS.agehigh <- SurvObjects(PM_SurvData_AgeGroups$high, 
+                  colNames = c("OS_years", "Vital_status"), 
+                  group="LSC17_Group")
+OS.agehigh[[1]]
+```
+
+#Kaplan Meier plots 
+
+```{r}
+KM_CustomPlots <- function(SurvObjects.res,type){
+  #SurvObjects.res is the results from running SurvObjects()
+  # type is a character string of the type of survival - OS or EFS, etc used for the title of plot
+  
+    KM <- SurvObjects.res 
+    fit <- KM[[1]]
+    stats <- as.data.frame(KM[[2]])
+
+    pos <- (max(fit$time)*0.75)
+    type <- type
+    title <- paste(type,"Survival in PM AML", sep=" ")
+      
+    options(scipen=999)
+    pVal <- round(stats$pChisq, digits=4)
+    # print(pVal)
+
+    if ( pVal < 0.001 ){
+      p <- "p < 0.001"
+    }else{
+      p <- paste("p =", pVal, sep=" ")
+    }
+
+    if (length(fit$n) == 2){
+      # colors = c("dodgerblue4","red2")
+      colorcodes <- c(low="lightskyblue", high="red2")
+      group <- "median"
+    }else if (length(fit$n) == 4){
+      # colors = c("dodgerblue4","darkturquoise", "blueviolet", "firebrick")
+      # colorcodes <- c(q1="darkturquoise", q2="dodgerblue4",q3="blueviolet",q4="firebrick")
+      colorcodes <- c(q1="blueviolet", q2="orangered", q3="forestgreen",  q4="firebrick")
+      group <- "quantiles"
+    }
+
+    newDat <- data.frame(time=fit$time, prob=fit$surv)
+    
+    plot <- SurvivalPlot(fit, "LSC17 Group", "Years", colorcodes)
+    plot$labels$title <- title
+
+    plot <- plot +
+      annotate(geom="text", x=pos, y=1.0, label=p, size=5) +
+      scale_color_manual(values=colorcodes) +
+      guides(linetype=FALSE) 
+
+  return(plot)
+}
+```
+
+
+```{r}
+OS.list <- list(OS, OS.qt, OS.agelow, OS.agehigh)
+```
+
+
+```{r message=FALSE}
+OS.KMs <- lapply(OS.list, KM_CustomPlots, type="OS")
+names(OS.KMs) <- c("OS", "OS.qt", "OS.agelow", "OS.agehigh")
+
+OS.KMs
+```
+
+
+```{r}
+lapply(names(OS.KMs), function(i) ggsave(filename = paste0(i,"_OS.png"), plot=OS.KMs[[i]],
+                                           device = "png", height = 5, width = 7, units = "in", dpi=600))
+```
+
+
+
+#Session Information 
+
+```{r}
+sessionInfo()
+```
+
+

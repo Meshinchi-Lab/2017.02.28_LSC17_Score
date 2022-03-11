@@ -1,0 +1,389 @@
+---
+title: "LSC17 GSE12417 CN-AML Cohort"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+Jenny Smith 
+March 15, 2017 
+
+Purpose: To determine the level of stemmness for cytogenically normal  AML (CN-AML) patients from Microarray data using LSC17 gene score. 
+
+References: Nature. 2016 Dec 15;540(7633):433-437. doi: 10.1038/nature20598.
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE, fig.align='center')
+knitr::opts_knit$set(root.dir = '~/RNA_seq_Analysis/2017.02.28_LSC17_Score/GSE12417/')
+```
+
+
+```{r message=FALSE}
+library(EnsDb.Hsapiens.v79)
+library(survival)
+library(RColorBrewer)
+library(colorspace)
+library(stringr)
+library(GEOquery)
+library(Biobase)
+library(dplyr)
+library(ggplot2)
+library(GGally)
+library(gridExtra)
+library(grid)
+library(psych)
+getwd()
+```
+
+
+#Prepare the LSC17 Gene Signature Calulations and survival plot functions
+
+```{r message=FALSE}
+
+source("~/scripts/RNAseq_Analysis/LSC17_scores/LSC17_Score_Function_10May2017.r")
+
+source("~/scripts/survival_analysis/Survplot_Functions_2017.03.31.r")
+```
+
+
+
+From the GEO Data Processing Description: 
+"Normalization was performed using the *variance stabilizing normalization algorithm*, and probe set expression values were calculated by the *median polish method*. Quality control consisted of visual inspection of the array image for artifacts, assessment of RNA degradation plots, and inspection of rank-vs.-residual plots after normalization and probe set  summarization."
+
+Combined the GPL96 and GPL97 microarray gene expression sets to be consistent with the LSC17 Nature article Referenced above. 
+Information on affymetrix U133 Gene Chip: http://media.affymetrix.com/support/technical/datasheets/human_datasheet.pdf
+
+
+```{r}
+GSE_HighestGE <- get(load("GSE12417_CN-AML_U133Combined_LSC17genes_HighestExpn.RData"))
+
+head(GSE_HighestGE)
+# dim(GSE_HighestGE) #17 by 163
+```
+
+
+GCRMA outputs log2 transformed expression values. Nature authors used GCRMA package to normalize data. 
+http://jura.wi.mit.edu/bio/education/bioinfo2007/arrays/array_exercises_1R.html
+
+CGRMA Comparison Article: https://doi.org/10.1093/bioinformatics/btm201
+
+
+#Distribution of Expression Data 
+
+```{r}
+colors = rainbow_hcl(17)
+# mar=c(bottom,left,top, right)
+par(pty="m", las=2, mar=c(5,4,5,2))
+boxplot(t(GSE_HighestGE), col=colors, cex.axis = 0.85, ylim=c(5,14))
+title(main = "Distribution of Gene Expression for LSC17 Genes \n in GSE12417 Cohort", line=2.0, cex.main = 0.8, ylab = "Log2 GE", cex.lab=0.75)
+```
+
+
+#Load the Clinical data
+
+```{r}
+# GSE_clinData <- read.csv("~/RNA_seq_Analysis/2017.02.28_LSC17_Score/GSE12417/gse12417_CN-AML_GPL96_trainingSet_clinData.csv")
+GSE_clinData <- get(load("~/RNA_seq_Analysis/2017.02.28_LSC17_Score/GSE12417/GSE12417_CN-AML_clinData.RData"))
+
+head(GSE_clinData)
+# dim(GSE_clinData) #163 
+```
+
+```{r}
+#patients without AML 
+nonAML <- subset(GSE_clinData, GSE_clinData$pheno_data.cohort != "AML")$PatientID
+length(nonAML)
+```
+
+```{r}
+#subset the survival data to remove those cases identified above. 
+GSE_clinData <- GSE_clinData[ ! GSE_clinData$PatientID %in% nonAML, ]
+
+dim(GSE_clinData)
+```
+
+
+
+#Create LSC17 groups based on the  GE values
+
+This will be with not explicityl Log2 transformed values 
+```{r}
+GSE_SurvData <- LSC17Groups(clinData = GSE_clinData,
+                            ExpnData = GSE_HighestGE)
+
+
+GSE_SurvData <- LSC3Groups(clinData = GSE_SurvData,
+                           ExpnData = GSE_HighestGE)
+
+head(GSE_SurvData)
+```
+
+```{r}
+dim(GSE_SurvData)
+```
+
+```{r}
+# write.csv(GSE_SurvData, "GSE12417_CN-AML_LSC17_SurvData_12.02.17.csv")
+```
+
+
+#Bar plot of the Scores
+
+```{r}
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/ggplot_Themes_Function.r")
+```
+
+reordered <- LD.LSC17[order(LD.LSC17$LSC17_Score), ]
+med <- which( rownames(reordered) == "PARIFD")
+colorcodes <- c(low="darkturquoise", high="dodgerblue4")
+RG.colorcodes <- c(Low="green", High="red", Standard="yellow", Unknown="grey")
+
+tiff("LSC17_Score_WaterfallPlot.tiff", heig ht = 5, width = 7, units = "in", res = 600)
+ggplot(LD.LSC17, aes(x=reorder(LD.LSC17$TARGET.USI,LD.LSC17$LSC17_Score), y=LSC17_Score, fill=Risk.group)) +
+  geom_bar(stat = "identity") + geom_vline(xintercept = med) +
+  theme_JS + theme(axis.text.x = element_blank()) + 
+  scale_fill_manual(values = RG.colorcodes) + 
+  labs(x="Patient", y="LSC17 Score") 
+
+
+```{r}
+# tiff("GSE12417_LSC17_Score_WaterfallPlot.tiff", height = 5, width = 7, units = "in", res = 600)
+ggplot(GSE_SurvData, aes(x=reorder(GSE_SurvData$PatientID, GSE_SurvData$LSC17_Score), y=LSC17_Score, fill=LSC17_Group)) + 
+  geom_bar(stat = "identity") + 
+  theme_JS + 
+  theme(axis.text.x =  element_blank(), 
+        axis.ticks.x = element_blank()) + 
+  labs(x="Patient")
+# dev.off()
+```
+
+
+#Create a subset  of patients with low ages and High ages 
+
+```{r}
+median(GSE_clinData$Age_years)
+range(GSE_clinData$Age_years)
+```
+
+```{r}
+#clinData
+GSE_clinData_AgeLow <- GSE_clinData[which(GSE_clinData$Age_years <= 60), ] #using 60 years
+
+dim(GSE_clinData_AgeLow) #91 
+```
+
+```{r}
+#clinical data
+GSE_clinData_AgeHigh <- GSE_clinData[which(GSE_clinData$Age_years >= 60), ]
+
+dim(GSE_clinData_AgeHigh) #74
+```
+
+
+
+#calculate LSC17 scores
+
+```{r}
+GSE_SurvData_AgeGroups <- lapply(list(GSE_clinData_AgeLow, GSE_clinData_AgeHigh),
+                                    LSC17Groups, ExpnData=GSE_HighestGE)
+
+GSE_SurvData_AgeGroups <- lapply(GSE_SurvData_AgeGroups,
+                                    LSC3Groups, ExpnData=GSE_HighestGE)
+
+names(GSE_SurvData_AgeGroups) <- c("Low", "High")
+lapply(GSE_SurvData_AgeGroups, head)
+```
+
+
+```{r}
+save(GSE_SurvData_AgeGroups, file = "GSE12417_CN-AML_LSC17_survData_AgeGroups.RData")
+```
+
+
+#Summary stats on the age of patients in low and high LSC17 groups. 
+
+Range of ages of all patients
+```{r}
+range(GSE_SurvData$Age_years)
+```
+
+Find the median age for each group - high and low LSC17 
+```{r}
+range(subset(GSE_SurvData, GSE_SurvData$LSC17_Group == "high")$Age_years)
+range(subset(GSE_SurvData, GSE_SurvData$LSC17_Group == "low")$Age_years)
+```
+
+
+```{r}
+range(GSE_SurvData_AgeGroups$Low$Age_years)
+range(GSE_SurvData_AgeGroups$High$Age_years)
+```
+
+
+
+#Suvival Analysis with Kaplan-Meier Curves 
+```{r}
+KM_CustomPlots <- function(SurvObjects.res,type){
+  #SurvObjects.res is the results from running SurvObjects()
+  # type is a character string of the type of survival - OS or EFS, etc used for the title of plot
+  
+    KM <- SurvObjects.res 
+    fit <- KM[[1]]
+    stats <- as.data.frame(KM[[2]])
+
+    pos <- (max(fit$time)*0.75)
+    type <- type
+    title <- paste(type,"Survival in GSE12417 CN-AML", sep=" ")
+      
+    options(scipen=999)
+    pVal <- round(stats$pChisq, digits=4)
+    # print(pVal)
+
+    if ( pVal < 0.001 ){
+      p <- "p < 0.001"
+    }else{
+      p <- paste("p =", pVal, sep=" ")
+    }
+
+    if (length(fit$n) == 2){
+      # colors = c("dodgerblue4","red2")
+      colorcodes <- c(low="lightskyblue", high="red2")
+      group <- "median"
+    }else if (length(fit$n) == 4){
+      # colors = c("dodgerblue4","darkturquoise", "blueviolet", "firebrick")
+      # colorcodes <- c(q1="darkturquoise", q2="dodgerblue4",q3="blueviolet",q4="firebrick")
+      colorcodes <- c(q1="blueviolet", q2="orangered", q3="forestgreen",  q4="firebrick")
+      group <- "quantiles"
+    }
+
+    newDat <- data.frame(time=fit$time, prob=fit$surv)
+    
+    plot <- SurvivalPlot(fit, "LSC17 Group", "Years", colorcodes)
+    plot$labels$title <- title
+
+    plot <- plot +
+      annotate(geom="text", x=pos, y=1.0, label=p, size=5) +
+      scale_color_manual(values=colorcodes) +
+      guides(linetype=FALSE) 
+
+  return(plot)
+}
+```
+
+
+#OS
+
+```{r}
+OS <- SurvObjects(df=GSE_SurvData, 
+                  colNames=c("OS_days", "vital_status"),
+                  group = "LSC17_Group",
+                  time="DtoY")
+OS[[1]]
+```
+
+
+```{r}
+OS.qt <- SurvObjects(df=GSE_SurvData, 
+                  colNames=c("OS_days", "vital_status"),
+                  group = "LSC17_Quantile",
+                  time="DtoY")
+
+OS.qt[[1]]
+```
+
+
+```{r}
+OS.Agelow <- SurvObjects(df=GSE_SurvData_AgeGroups$Low, 
+                  colNames=c("OS_days", "vital_status"),
+                  group = "LSC17_Group",
+                  time="DtoY")
+OS.Agelow[[1]]
+```
+
+
+```{r}
+OS.Agehigh <- SurvObjects(df=GSE_SurvData_AgeGroups$High, 
+                  colNames=c("OS_days", "vital_status"),
+                  group = "LSC17_Group",
+                  time="DtoY")
+
+OS.Agehigh[[1]]
+```
+
+#Kaplan-Meier Plots
+
+```{r}
+OS.list <- list(OS, OS.qt, OS.Agelow, OS.Agehigh)
+```
+
+```{r message=FALSE}
+KMs <- lapply(OS.list, KM_CustomPlots, type="OS")
+names(KMs) <- c("OS", "OS.qt", "OS.Agelow", "OS.Agehigh")
+KMs
+```
+
+
+```{r}
+lapply(names(KMs), function(i) ggsave(filename = paste0(i,"_OS.png"), plot=KMs[[i]],
+                                           device = "png", height = 5, width = 7, units = "in", dpi=600))
+```
+
+
+
+
+
+
+
+#Cox Proportional Hazards Model - Multivariate Suvival Analysis
+
+
+First and foremost is the issue of non-informative censoring. To satisfy this assumption, the design of the underlying study must ensure that the mechanisms giving rise to censoring of individual subjects are not related to the probability of an event occurring. For example, in clinical studies, care must be taken that continuation of follow-up not depend on a participants medical condition. Violation of this assumption can invalidates just about any sort of survival analysis, from Kaplan-Meier estimation to the Cox model.
+
+The second key assumption in the Cox model is that of proportional hazards. In a regression type setting this means that the survival curves for two strata (determined by the particular choices of values for the $x$-variables) must have hazard functions that are proportional over time (i.e. constant relative hazard). We have seen how this can be evaluated graphically using "log-log" plots in the two-sample comparison case. In that situation, and also for the Cox model, there are tests that can be applied to test proportionality.
+
+https://www.stat.ubc.ca/~rollin/teach/643w04/lec/node69.html
+
+```{r}
+#cox porportional hazards model. Only consider LSC17 score initially
+GSE_SurvData$LSC17_Group <- relevel(as.factor(GSE_SurvData$LSC17_Group), ref="low")
+
+CPH_LSC17_model <- coxph(Surv(OS_days, vital_status) ~ LSC17_Group, data = GSE_SurvData)
+
+summary(CPH_LSC17_model)
+```
+
+
+```{r}
+cox.zph(CPH_LSC17_model)
+```
+no violations as the p value is not significant. 
+
+
+```{r}
+#cox porportional hazards model.
+CPH_Multivar <- coxph(Surv(OS_days, vital_status) ~ Age_years + pheno_data.FAB_group + LSC17_Group,
+                      data = GSE_SurvData)
+
+CPH_Multivar
+```
+
+
+```{r}
+cox.zph(CPH_Multivar)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

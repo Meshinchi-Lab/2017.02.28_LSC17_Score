@@ -1,0 +1,1535 @@
+---
+title: "LSC17 in TARGET AML"
+author: "Jenny Smith"
+date: "August 19, 2019"
+output: html_document
+---
+
+Purpose: To determine the level of stemmness for pediatric AML patients from RNAseq data using LSC17 gene score. 
+
+Reference:  A 17-gene stemness score for rapid determination of risk in acute leukaemia. Nature. 2016 Dec 15;540(7633):433-437. doi: 10.1038/nature20598. Epub 2016 Dec 7.
+
+#Set-up 
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 4, fig.width = 6)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME, '2017.02.28_LSC17_Score/TARGET/'))
+options(stringsAsFactors = FALSE)
+```
+
+```{r message = FALSE, warning=FALSE}
+# library(survival)
+# library(RColorBrewer)
+# library(colorspace)
+library(ggplot2)
+library(GGally)
+library(ggsci)
+# 
+library(magrittr)
+library(stringr)
+# library(survMisc)
+
+# library(reshape2)
+# library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+
+library(readr)
+library(tibble)
+library(purrr)
+
+
+getwd()
+```
+
+
+#Prepare the LSC17 Gene Signature Calulations and survival plot functions
+
+```{r message=FALSE}
+source(file.path(SCRIPTS, "RNAseq_Analysis/Analysis/LSC17_scores/LSC17_Score_Function_10May2017.r"))
+source(file.path(SCRIPTS, "survival_analysis/Survplot_Functions_2018.10.24.r"))
+```
+
+
+#Define Functions to be used
+
+```{r}
+LSC17Dist <- function(df, dfName){
+  colors = rainbow_hcl(17)
+  par(pty="m", las=2, mar=c(5,4,5,2))
+  boxplot(t(df[match(LSC17_dfB$LSC_genes, rownames(df)), ]), col=colors, cex.axis = 0.85)
+  
+  title <- paste("Distribution of Gene Expression for LSC17 Genes \n in", dfName, sep = " ")
+  title(main = title, line = 1.5, cex.main = 0.8, ylab = "Log2 RPKM", cex.lab=0.75)
+}
+```
+
+```{r}
+KM.plot.fromCSV <- function(df,name,cc="switch"){
+  library(tidyr)
+  library(dplyr)
+  # name is a character vector for the title. 
+  strata <- grep("Time", colnames(df), value=TRUE, invert = TRUE)
+
+
+  if (length(strata) == 2){
+      if (grepl("q4", name)){
+        
+        if ( cc=="switch"){
+          colorcodes <- c("level_2"="darkturquoise", "level_1"="firebrick") #order changed in Q4 Std Risk Analysis by Rob
+          label <- c("level_2"="q123.combined", "level_1"="q4")
+        }else{
+          colorcodes <- c("level_1"="darkturquoise", "level_2"="firebrick")
+          label <- c("level_1"="q123.combined", "level_2"="q4")
+        }
+        
+        
+        # print(colorcodes)
+      }else{
+        colorcodes <- c("level_1"="darkturquoise", "level_2"="dodgerblue4")
+        label <- c("level_1"="low", "level_2"="high")
+      }
+
+
+  }else if (length(strata) == 4){
+      colorcodes <- c("level_1"="blueviolet", "level_2"="orangered",
+                      "level_3"="forestgreen",  "level_4"="firebrick")
+      label <- c("level_1"="q1", "level_2"="q2","level_3"="q3", "level_4"="q4")
+      # group <- name
+  }
+
+  df <- df %>%
+    gather(var, value, -Time)
+
+  p <- ggplot(df, aes(x=Time, y=value, color=var)) +
+    geom_line(size=1.25) +
+    scale_color_manual(name="LSC17 Group", values = colorcodes, labels=label) +
+    scale_y_continuous(limits = c(0,1.0), breaks = seq(0,1.0, 0.2)) +
+    scale_x_continuous(limits = c(0,max(df$Time)), breaks = seq(0,max(df$Time), 1)) +
+    labs(y= "Fraction", x = "Years") +
+    theme(plot.title = element_text(hjust = 0.5, size=18),
+          panel.background = element_rect(fill="white"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.text = element_text(colour = "black"),
+          axis.text.y = element_text(size = 18),
+          axis.text.x = element_text(size=18),
+          axis.title = element_text(size = 18),
+          panel.border = element_rect(colour = "dark grey", fill= NA, size=1.0),
+          legend.text = element_text(size=14),
+          legend.title = element_text(size=14))
+
+  return(p)
+}
+```
+
+
+#Read in the Clinical Data
+
+From Todd/Rob at COG
+The four patients who did not consent to banked specimen research and with LSC17 results are: 773920, 775026, 786948, 799528.
+
+```{r}
+# merged <- read.csv(file.path(CDE,"/Merged/00_Old/TARGET_AML_0531_1031_merged_CDEs_9.4.19.csv")) %>% 
+merged <- read.csv(file.path(CDE,"/Merged/TARGET_AML_0531_1031_merged_CDEs_12.09.20.csv"),
+                   na.strings = c("#N/A","N/A","NA", "", ".")) %>% 
+  filter(!is.na(USI), USI != "Unknown") %>% 
+  set_rownames(.$USI)
+
+head(merged[,1:5])
+dim(merged) #2314  150
+sum(duplicated(merged$USI))
+```
+
+```{r}
+#Keep for ID mapping Reg and USI for ineligable pts
+toRemove <- merged %>% 
+  filter(Reg. %in% c(773920,775026, 786948,799528)) %>% 
+  select(Reg.,USI, Protocol)
+toRemove
+```
+
+```{r}
+merged <- merged %>% 
+  filter(!USI %in% toRemove[["USI"]]) %>% 
+  filter(Eligibility_Comments != "remove") %>% 
+  set_rownames(.$USI)
+
+# head(merged[,1:5])
+dim(merged)  #2217  150
+table(merged$Eligibility_Comments)
+```
+
+```{r}
+manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_02.04.21.csv")) 
+
+
+dim(manifest)
+head(manifest)
+
+table(manifest$Batch)
+```
+
+
+rem_manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/TARGET_AML_1031_Remission_Ribodepleted_RNAseq_Manifest_9.1.20.csv")) %>% 
+   left_join(., select(merged,USI,Reg.,Primary.Fusion.CNV,Additional.Fusions.CNV), by="USI")
+
+manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/TARGET_AML_Ribodepleted_Master_Manifest_8.5.20.csv"), row.names = 1) %>% 
+  bind_rows(., select(rem_manifest, Sample=Sample.ID,USI,Reg.,
+                      Protocol,Tissue=Anatomic.Site,Library=GSC.Library) %>% 
+                mutate_at(vars(Tissue),~gsub("Blood","peripheral_blood",
+                                             gsub("Bone Marrow", "bone_marrow", .))) %>%
+                mutate_at(vars(Sample),~gsub("-","\\.", .)) %>%
+                mutate(Time_point="Remission",
+                       Batch="rmsn1",
+                       Group="AML")) %>%
+  select(-Protocol2)
+
+dim(manifest)
+head(manifest)
+
+
+
+```{r}
+samples_to_share <- manifest %>% 
+  filter(grepl("dx|rlps|rem",Batch), grepl("AML|NBM|CD34_PB",Group)) %>% 
+  arrange(Sample) %>%
+  select(Sample,USI,Protocol,Group,Time_point,Tissue,Batch)
+
+dim(samples_to_share) #2228    7
+head(samples_to_share)
+# View(samples_to_share)
+
+# write.csv(samples_to_share,"expression_data/TARGET_AML_Ribodepleted_Diagnostic_Relapse_Remission_RNAseq_Manifest.csv")
+table(samples_to_share$Protocol, useNA = 'ifany')
+```
+
+
+#Read in the expression data 
+
+To clarify, since the box-and-whisker plot represents combined 0531+1031 datasets, would it be possible to analyze the full dataset for 0531 and 1031? If this is feasible, then I would change my request from RPKM to TMM normalized counts. While I realize that many problems arise with combining RNA-seq datasets, I worry that less common fusion types (CBFA2T3-GLIS2 and NUP98) will have insufficient numbers for any meaningful analysis. Perhaps to help us make this decision, could you provide the number of patients:
+
+(1) CBFA2T3-GLIS2 on 0531 versus 1031
+(2) NUP98-KDM5A on 0531 versus 1031
+(3) NUP98-NSD1 on 0531 versus 1031
+
+##RPKM 
+
+```{r}
+RPKM <- read_csv(file.path(HOME,"0000.00.03_Expression_Matrices/TARGET_AML_AAML0531_dupGenesRemoved_RPKM.csv")) %>%
+  select(-matches("\\.1|^BM|^RO")) %>%
+  select(X1, which(colnames(.) %in% merged$USI)) %>% 
+  column_to_rownames("X1") 
+
+dim(RPKM)
+head(RPKM[,1:5])
+# write.csv(RPKM,"TARGET_AML_0531_dupGenesRemoved_RPKM.csv")
+```
+
+```{r}
+log2.0531 <- log2(RPKM+1)
+head(log2.0531[,1:5])
+# dim(log2)
+```
+
+```{r}
+RPKM_1031 <- read_csv(file.path(HOME,"0000.00.03_Expression_Matrices/TARGET_AML_0531_1031_Ribodepleted_RNAseq_dupGenesRemoved_RPKM.csv")) %>%
+  select(-matches("replicate|sort|MV4|^Kas|MPN[0-9]")) %>%
+  set_colnames(c("gene",str_split_fixed(colnames(.)[-1],pattern = "\\.", n=4)[,3])) 
+
+dim(RPKM_1031) # #51573  1178
+sum(colnames(RPKM_1031) %in% colnames(RPKM)) #126
+
+RPKM.1031 <- RPKM_1031 %>% 
+  select(which(!colnames(.) %in% colnames(RPKM))) %>% #No overlapping patients
+  select(gene,which(colnames(.) %in% 
+                      filter(merged,Protocol=="AAML1031", !is.na(OS.time..days.))$USI)) %>%
+  column_to_rownames("gene")
+
+dim(RPKM.1031)
+head(RPKM.1031[,1:5])
+
+# write.csv(RPKM.1031, "TARGET_AML_1031_Ribodepleted_RNAseq_dupGenesRemoved_RPKM.csv", row.names=TRUE)
+```
+
+```{r}
+log2.1031 <- log2(RPKM.1031+1)
+head(log2.1031[,1:5])
+# dim(log2.1031) #1,111 samples
+```
+
+##TPM 
+
+```{r}
+TPM <- read_csv(file.path(HOME,"0000.00.03_Expression_Matrices/TARGET_AML_AAML0531_dupGenesRemoved_TPM.csv")) %>%
+  select(-matches("\\.1|^BM|^RO")) %>%
+  select(X1, which(colnames(.) %in% merged$USI)) %>% 
+  column_to_rownames("X1") 
+
+dim(TPM) #51573   442
+head(TPM[,1:5])
+# write.csv(TPM,"TARGET_AML_0531_dupGenesRemoved_TPM.csv")
+```
+
+```{r}
+TPM_1031 <- read_csv(file.path(HOME,"0000.00.03_Expression_Matrices/TARGET_AML_0531_1031_Ribodepleted_RNAseq_dupGenesRemoved_TPM.csv")) %>%
+  select(-matches("replicate|sort|MV4|^Kas|MPN[0-9]")) %>%
+  set_colnames(c("gene",str_split_fixed(colnames(.)[-1],pattern = "\\.", n=4)[,3])) 
+
+dim(TPM_1031) # #51573  1178
+sum(colnames(TPM_1031) %in% colnames(TPM)) #126
+
+
+TPM.1031 <- TPM_1031 %>% 
+  select(which(!colnames(.) %in% colnames(TPM))) %>% #No overlapping patients
+  select(gene,which(colnames(.) %in% 
+                      filter(merged,Protocol=="AAML1031", !is.na(OS.time..days.))$USI)) %>%
+  column_to_rownames("gene")
+
+dim(TPM.1031) #51573  1061
+head(TPM.1031[,1:5])
+
+# write.csv(TPM.1031, "TARGET_AML_1031_Ribodepleted_RNAseq_dupGenesRemoved_TPM.csv", row.names=TRUE)
+```
+
+```{r eval=FALSE}
+#TPM to Share with Ben
+TPM_df1 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_0531_1031_Ribodepleted_RNAseq_dupGenesRemoved_TPM.csv")) %>%
+  select(Gene=X1,everything())
+
+
+TPM_df2 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_0531_1031_Relapse_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.csv")) %>% 
+  select(Gene=X1,everything()) %>%
+  rename_at(vars(TARGET.20.PARSHM.03A.01R:TARGET.20.PAWDTX.04A.01R),
+            ~ifelse(. %in% colnames(TPM_df1), paste0(.,"_replicate"), .))
+
+
+TPM_df3 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_1031_Remission_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.csv")) %>% 
+  select(Gene=X1,everything())
+
+TPM_final <- bind_cols(TPM_df1, TPM_df2[,-1], TPM_df3[,-1])
+dim(TPM_final) #51573  2418
+# saveRDS(TPM_final,file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_MPN_DS_NBM_2418Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.RDS"))
+
+# # head(TPM_df1[,1:5])
+# dim(TPM_df1)
+# # 
+# # head(TPM_df2[,1:5])
+# dim(TPM_df2)
+# # 
+# # head(TPM_df3[,1:5])
+# dim(TPM_df3) #51573   301
+
+# identical(TPM_df1$Gene, TPM_df2$Gene) #OK
+# identical(TPM_df2$Gene, TPM_df3$Gene)
+# 
+# table(colnames(TPM_df1) %in% colnames(TPM_df2)) #shared "Gene" col
+# table(colnames(TPM_df1) %in% colnames(TPM_df3))
+# table(colnames(TPM_df2) %in% colnames(TPM_df3))
+```
+
+```{r }
+TPM_final <- readRDS(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_MPN_DS_NBM_2418Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.RDS"))
+dim(TPM_final)
+
+
+
+TPM_share <- TPM_final[,c("Gene",samples_to_share$Sample)]
+dim(TPM_share)
+head(TPM_share[,1:5]) #51573  2229
+# write.csv(TPM_share,"expression_data/TARGET_AML_Ribodepleted_Diagnostic_Relapse_Remission_RNAseq_TPM.csv")
+
+
+
+```
+
+
+
+## Raw Counts 
+
+```{r}
+cts <- read_csv("~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_AAML0531_dupGenesRemoved_FractionalCounts.csv") %>%
+  select(-matches("\\.1|^BM|^RO")) %>%
+  select(gene=X1, which(colnames(.) %in% merged$USI)) %>%
+  column_to_rownames("gene")
+
+dim(cts)
+head(cts[,1:5]) #51573   442
+# write.csv(cts,"TARGET_AML_0531_dupGenesRemoved_FractionalCounts.csv", row.names = TRUE)
+```
+
+```{r}
+cts_1031 <- read_csv(file.path(HOME, "0000.00.03_Expression_Matrices/TARGET_AML_0531_1031_Ribodepleted_RNAseq_dupGenesRemoved_FractionalCounts.csv")) %>%
+  select(-matches("replicate|sort|MV4|^Kas|MPN[0-9]")) %>%
+  set_colnames(c("gene",str_split_fixed(colnames(.)[-1],
+                                        pattern = "\\.", n=4)[,3])) 
+
+head(cts_1031[,1:5])
+dim(cts_1031) #51573 1461
+
+cts.1031 <- cts_1031 %>%
+  select(which(!colnames(.) %in% colnames(cts))) %>% #No overlapping patients
+  select(gene,which(colnames(.) %in%
+                      filter(merged,Protocol=="AAML1031", !is.na(OS.time..days.))$USI)) %>%
+  column_to_rownames("gene")
+
+dim(cts.1031) #51573  1061
+head(cts.1031[,1:5])
+# write.csv(cts.1031,"TARGET_AML_1031_Ribodepleted_RNAseq_dupGenesRemoved_FractionalCounts.csv")
+```
+
+```{r eval=FALSE}
+sum(colnames(cts_1031) %in% colnames(cts)) #126
+pts.common <- intersect(colnames(cts_1031), colnames(cts))
+
+#Create a data frame with both RBD and PolyA counts
+cts_common <- cts %>% 
+  rownames_to_column("gene") %>%
+  select(gene, pts.common) %>% 
+  gather(USI,counts_polyA,-gene) %>% 
+  inner_join(., cts_1031 %>% 
+               select(gene, pts.common) %>% 
+               gather(USI,counts_RBD,-gene), 
+             by=c("USI","gene"))
+
+head(cts_common)
+dim(cts_common)
+# write.csv(cts_common, "TARGET_AML_0531_1031_batchDuplicates_RNAseq_dupGenesRemoved_FractionalCounts.csv", row.names=TRUE)
+```
+
+## Shared / Combined Counts
+
+```{r eval=FALSE}
+#cts to Share with Ben
+cts_df1 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_0531_1031_Ribodepleted_RNAseq_dupGenesRemoved_FractionalCounts.csv")) %>%
+  select(Gene=X1,everything())
+
+
+cts_df2 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_0531_1031_Relapse_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.csv")) %>% 
+  select(Gene=X1,everything()) %>%
+  rename_at(vars(TARGET.20.PARSHM.03A.01R:TARGET.20.PAWDTX.04A.01R),
+            ~ifelse(. %in% colnames(cts_df1), paste0(.,"_replicate"), .))
+
+cts_df3 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_1031_Remission_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.csv")) %>% 
+  select(Gene=X1,everything())
+
+
+cts_df4 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AAML08B1_AAML1531_Ribodepleted_RNAseq_DS-AML_dupGenesRemoved_FractionalCounts.csv")) %>% 
+  select(Gene=X1,everything())
+
+
+head(cts_df1[,1:5])
+dim(cts_df1)
+#
+head(cts_df2[,1:5])
+dim(cts_df2)
+#
+head(cts_df3[,1:5])
+dim(cts_df3) #51573   301
+
+head(cts_df4[,1:5])
+dim(cts_df4) #51573   301
+
+identical(cts_df1$Gene, cts_df2$Gene) #OK
+identical(cts_df1$Gene, cts_df3$Gene)
+identical(cts_df1$Gene, cts_df4$Gene)
+
+Reduce(intersect, list(colnames(cts_df1),
+                       colnames(cts_df2), 
+                       colnames(cts_df3),
+                       colnames(cts_df4))) #OK 
+
+cts_final <- bind_cols(cts_df1, cts_df2[,-1], cts_df3[,-1], cts_df4[,-1])
+dim(cts_final) #51573  2646
+
+
+# saveRDS(cts_final,file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_MPN_DS_NBM_2646Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.RDS"))
+```
+
+
+```{r}
+cts_final <- readRDS(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_MPN_DS_NBM_2418Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_FractionalCounts.RDS"))
+dim(cts_final)
+  
+cts_share <- cts_final[,c("Gene",samples_to_share$Sample)]
+dim(cts_share)
+head(cts_share[,1:5]) #51573  2229
+# write.csv(cts_share,"expression_data/TARGET_AML_Ribodepleted_Diagnostic_Relapse_Remission_RNAseq_FractionalCounts.csv")
+```
+
+```{r eval=FALSE}
+#cts to Share with Ben
+tpm_df1 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_0531_1031_Ribodepleted_RNAseq_dupGenesRemoved_TPM.csv")) %>%
+  select(Gene=X1,everything())
+
+
+tpm_df2 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_0531_1031_Relapse_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.csv")) %>% 
+  select(Gene=X1,everything()) %>%
+  rename_at(vars(TARGET.20.PARSHM.03A.01R:TARGET.20.PAWDTX.04A.01R),
+            ~ifelse(. %in% colnames(tpm_df1), paste0(.,"_replicate"), .))
+
+tpm_df3 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_1031_Remission_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.csv")) %>% 
+  select(Gene=X1,everything())
+
+
+tpm_df4 <- read_csv(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AAML08B1_AAML1531_Ribodepleted_RNAseq_DS-AML_dupGenesRemoved_TPM.csv")) %>% 
+  select(Gene=X1,everything())
+
+
+head(tpm_df1[,1:5])
+dim(tpm_df1)
+#
+head(tpm_df2[,1:5])
+dim(tpm_df2)
+#
+head(tpm_df3[,1:5])
+dim(tpm_df3) #51573   301
+
+head(tpm_df4[,1:5])
+dim(tpm_df4) #51573   301
+
+identical(tpm_df1$Gene, tpm_df2$Gene) #OK
+identical(tpm_df1$Gene, tpm_df3$Gene)
+identical(tpm_df1$Gene, tpm_df4$Gene)
+
+Reduce(intersect, list(colnames(tpm_df1),
+                       colnames(tpm_df2), 
+                       colnames(tpm_df3),
+                       colnames(tpm_df4))) #OK 
+
+tpm_final <- bind_cols(tpm_df1, tpm_df2[,-1], tpm_df3[,-1], tpm_df4[,-1])
+dim(tpm_final) #51573  2646
+
+
+# saveRDS(tpm_final,file.path(PROJHOME,"0000.00.03_ExpressionMatrices/TARGET_AML_MPN_DS_NBM_2646Samples_Ribodepleted_RNAseq_geneLevel_dupGenesRemoved_TPM.RDS"))
+```
+
+## Comparison PolyA to RBD Biotypes
+
+```{r}
+IDmap <- read.csv(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/GRCh37_Ensembl_v69_TranscriptLevel_IDmap.csv"))
+```
+
+
+```{r}
+GeneIDmap <- IDmap %>% 
+  select(gene_id,gene_name, gene_biotype) %>% 
+  distinct() %>% 
+  arrange(gene_name) %>% 
+  filter(!duplicated(gene_name)) %>%  #biotypes are identical for dup genes
+  mutate(biotype_groups=case_when(
+    
+  ))
+
+
+
+  
+head(GeneIDmap)
+dim(GeneIDmap) #60386     3
+length(unique(GeneIDmap$gene_biotype))
+```
+
+```{r}
+GeneIDmap %>% 
+  group_by(gene_biotype) %>% 
+  count()
+
+# table(duplicated(GeneIDmap$gene_id))
+# table(duplicated(GeneIDmap$gene_name))
+```
+
+
+# Manuscript Outline
+
+OUTLINE
+
+Fig 1 *done*
+-- TCGA AML (LSC17 Low versus High): total cohort (n=155), age < 60 years of age (n=99), age > 60 years of age (n=79). 
+-- LSC17 is not a universal biomarker.
+-- S1: Waterfall plot of LSC17 scores.
+ 
+Fig 2 *done*
+-- AAML0531 (training dataset) and 1031 (validation dataset): LSC17 Low versus High and LSC17 by Quartile.
+-- Ben todo: patient characteristics and comparisons between AAML0531 and 1031.
+-- LSC17 appears to perform well as a biomarker to predict outcome (for all comers).
+-- S2: Waterfall plots for AAML0531 and AAML1031.
+ 
+Fig 3
+-- Hazard ratios for LSC17 taking into account established risk stratification groups (low, standard, high).
+-- Jenny, would it be too much more work to see how Kaplan-Meier curves look based on the proposed AAML1831 risk stratification groups? *done*
+-- S3: Kaplan-Meier curves making the same point.
+ 
+Fig 4
+-- Box plot of LSC17 scores as a function of fusion status. *done*
+-- Jenny, could you create Kaplan-Meier curves (EFS and OS) for each category within the first box plot (e.g., GLIS2, del(5q)/monosomy 7, NUP98, DEK/NUP214, KMT2A, CBFB-MYH11, RUNX1-RUNX1T1, None or Other) as a function of low versus high LSC17 score? *done*
+-- S4 box plot of LSC17 scores as a function of KMT2A partner. *done*
+-- Jenny, could you create a pair of Kaplan-Meier curves (EFS and OS) that includes each of the KMT2A partners that recapitulates this plot (https://ashpublications.org/blood/article/128/22/1211/95965/Prognostic-Significance-of-11q23-MLL-Fusion)? Here is a recommended color palette (you can ignore KMT2A-X):
+"#2b71a8, #d8b74b, #777777,#a06058, #83a6d8, #20353e" *done*
+-- S4: Volcano plots of differential gene expression based on EFS status.
+ 
+ 
+Fig 5
+-- Ben todo: Since LSC17 scores don't add prognostic data over established stratification strategies, can we take the full RNA-seq dataset for these patients and identify a panel of transcriptional biomarkers that differentiate between low and high risk leukemias within each subgroup of interest? One of the challenges here is that we won't have training and validation datasets (the numbers simply won't be large enough). But if we find something exciting here, then we could consider collaborating with another consortium to use their data as the validation dataset (assuming that they have sufficient numbers of patients). I'm working on scripts to execute the PAM and LASSO algorithms now (the two algorithms that established Ph-like ALL and LSC17 signatures, respectively).
+
+
+*Final Adjustments*
+
+(1) You may have noticed that DEK-NUP214 wasn't part of today's presentation. The cohort sample sizes were simply too small to make meaningful conclusions. Could you repeat the LSC17 "fusion-based" analysis by incorporating DEK-NUP214 back into the "None or Other" category (for the dot plot and Kaplan-Meier curves)? Similar to last time, don't worry about figure formatting.
+ 
+(2) I believe that CBFA2T3-GLIS2 cohort may have been missing from the initial set of Kaplan-Meier curves stored in the "Cytogenetic_Fusion_Groups" folder? Let me know if I somehow missed this. *done*
+
+(3) Could you repeat the Kaplan-Meier analysis (yet again) by altering what is categorized as LSC17 high versus low? So for each cytogenetic/fusion class, find the median within that class and plot the Kaplan-Meier curve based on this "new" definition of LSC17 high versus low. In essence, can LSC17 be re-purposed by changing the definition of "median" based on underlying cytogenetic/fusion class? *done*
+
+
+#Create LSC17 datasets 
+
+```{r}
+labs <- rep(paste0(seq(0,100,by=10), "%"), each=2)
+labs <- labs[-c(1,22)]
+idx <- seq(1,20,by=2)
+labs <- sapply(idx, function(x) paste(labs[x], labs[x+1], sep="-"))
+labs
+```
+
+## 1031
+
+```{r}
+LSC17.1031 <- read.csv("TARGET_1031_CDE_withLSC17Score_9.4.19.csv") %>% 
+  select(USI, matches("LSC"),dataset) %>% 
+  left_join(., merged, by="USI") #Update CDEs
+
+
+# LSC17.1031 <- LSC17Groups(clinData = merged[merged$Protocol == "AAML1031",],   #ArmC changes observed trends
+#                           ExpnData = log2.1031)
+# 
+# LSC17.1031 <- LSC3Groups(clinData = LSC17.1031,
+#                           ExpnData=log2.1031) %>%
+#   
+#   mutate(q4_vs_q123=ifelse(grepl("q4", LSC17_Quantile), "q4", "q123"), 
+#          dataset="RBD_RNAseq") %>% 
+#   arrange(desc(LSC17_Score)) %>% 
+#   
+#   mutate(LSC17_Deciles=cut(LSC17_Score,
+#          breaks = quantile(LSC17_Score, probs = seq(0,1,length.out = 11), type=5),
+#          labels =  labs,
+#          include.lowest=TRUE)) %>%
+#   
+#   mutate(LSC17_Quantile=factor(LSC17_Quantile, levels = paste0("q",1:4)), 
+#          LSC17_Deciles=factor(LSC17_Deciles, levels = labs)) %>%
+#   
+#   mutate(NewLSC17_Group=case_when(
+#     grepl("0%-10%|10%-20%|20%-30%", LSC17_Deciles) ~ "Low",
+#     grepl("30%-40%|40%-50%|50%-60%|60%-70%", LSC17_Deciles) ~ "Intermediate",
+#     grepl("70%-80%|80%-90%|90%-100%", LSC17_Deciles) ~ "High"))
+
+
+dim(LSC17.1031) #1061 patients, 147 columns
+head(LSC17.1031)
+# write.csv(LSC17.1031, "TARGET_1031_CDE_withLSC17Score_9.4.19.csv", row.names = FALSE)
+# write.csv(LSC17.1031, "TARGET_1031_CDE_withLSC17Score_2.17.21.csv", row.names = FALSE)
+```
+
+```{r}
+LSC17.1031.subset <- read.csv("TARGET_1031_CDE_withLSC17Score_ExcludeArmC_9.4.19.csv") %>% 
+  select(USI, matches("LSC"), dataset) %>% 
+  left_join(., merged, by="USI") #Update CDEs
+
+# LSC17.1031.subset <- LSC17Groups(clinData = merged[merged$Protocol == "AAML1031" & merged$Treatment.Arm != "Arm C", ],  #merged$Treatment.Arm != "Arm C" #ArmC changes observed trends
+#                           ExpnData = log2.1031)
+# 
+# LSC17.1031.subset <- LSC3Groups(clinData = LSC17.1031.subset,
+#                           ExpnData=log2.1031) %>%
+#   
+#   mutate(q4_vs_q123=ifelse(grepl("q4", LSC17_Quantile), "q4", "q123"), 
+#          dataset="RBD_RNAseq") %>% 
+#   arrange(desc(LSC17_Score)) %>% 
+#   
+#   mutate(LSC17_Deciles=cut(LSC17_Score,
+#          breaks = quantile(LSC17_Score, probs = seq(0,1,length.out = 11), type=5),
+#          labels =  labs,
+#          include.lowest=TRUE)) %>%
+#   
+#   mutate(LSC17_Quantile=factor(LSC17_Quantile, levels = paste0("q",1:4)), 
+#          LSC17_Deciles=factor(LSC17_Deciles, levels = labs)) %>%
+#   
+#   mutate(NewLSC17_Group=case_when(
+#     grepl("0%-10%|10%-20%|20%-30%", LSC17_Deciles) ~ "Low",
+#     grepl("30%-40%|40%-50%|50%-60%|60%-70%", LSC17_Deciles) ~ "Intermediate",
+#     grepl("70%-80%|80%-90%|90%-100%", LSC17_Deciles) ~ "High"))
+
+dim(LSC17.1031.subset) #982patients, 147 columns
+head(LSC17.1031.subset)
+# write.csv(LSC17.1031.subset, "TARGET_1031_CDE_withLSC17Score_ExcludeArmC_9.4.19.csv", row.names = FALSE)
+```
+
+```{r}
+addmargins(table(LSC17.1031$LSC17_Quantile, LSC17.1031$LSC17_Deciles, useNA = "always"))
+table(LSC17.1031$Protocol,LSC17.1031$Treatment.Arm, useNA = "always")
+table(LSC17.1031$LSC17_Deciles, LSC17.1031$NewLSC17_Group)
+```
+
+## 0531 
+
+```{r}
+ LSC17.0531 <- read.csv("TARGET_0531_CDE_withLSC17Score_10.21.19.csv") %>% 
+  select(USI, matches("LSC"), dataset) %>% 
+  left_join(., merged, by="USI") #Update CDEs
+
+# LSC17.0531 <- LSC17Groups(clinData = merged,
+#                           ExpnData = log2.0531)
+# 
+# LSC17.0531 <- LSC3Groups(clinData = LSC17.0531,
+#                         ExpnData=log2.0531) %>%
+# mutate(q4_vs_q123=ifelse(grepl("q4", LSC17_Quantile), "q4", "q123"),
+#        dataset="PolyA_RNAseq") %>%
+# arrange(desc(LSC17_Score)) %>%
+# 
+# mutate(LSC17_Deciles=cut(LSC17_Score,
+#        breaks = quantile(LSC17_Score, probs = seq(0,1,length.out = 11), type=5),
+#        labels =  labs,
+#        include.lowest=TRUE)) %>%
+# mutate(NewLSC17_Group=case_when(
+#   grepl("0%-10%|10%-20%|20%-30%", LSC17_Deciles) ~ "Low",
+#   grepl("30%-40%|40%-50%|50%-60%|60%-70%", LSC17_Deciles) ~ "Intermediate",
+#   grepl("70%-80%|80%-90%|90%-100%", LSC17_Deciles) ~ "High"))
+# 
+
+dim(LSC17.0531) #442 patients, 145 columns
+# head(LSC17.0531[,135:145])
+# write.csv(LSC17.0531, "TARGET_0531_CDE_withLSC17Score_10.21.19.csv", row.names = FALSE)
+# write.csv(LSC17.0531, "TARGET_0531_CDE_withLSC17Score_2.17.21.csv", row.names = FALSE)
+```
+
+```{r}
+table(LSC17.0531$Protocol)
+table(LSC17.0531$LSC17_Quantile, LSC17.0531$LSC17_Deciles, useNA = "always")
+table(LSC17.0531$LSC17_Deciles, LSC17.0531$NewLSC17_Group, useNA = "always")
+```
+
+
+##Combined Studies
+
+```{r}
+combo <- bind_rows(LSC17.1031, LSC17.0531) %>% 
+  mutate(Study=ifelse(Treatment.Arm == "TARGET", "TARGET", "AAML1031"))
+
+dim(combo) #1503  159
+```
+
+```{r}
+# map(select(combo, CBFA2T3.GLIS2, NUP98.NSD1, NUP98.KDM5A), function(x) table(x, combo$Study, useNA="ifany"))
+```
+
+```{r}
+table(combo$Cyto.Fusion.Molecular.Risk_update, useNA = 'ifany')
+```
+
+
+
+## Note Changes in CDE Versions 
+
+Also, from Sept. 2019 to Feb 2021, there were 3 samples whose primary fusion was updated.
+PARDZW (fusion call change to non-KMT2A)
+PAWMLN (fusion call change to non-NUP98)
+PAXYGD (fusion call change to NUP98-NSD1)
+
+
+```{r}
+#this merged dataframe was from "AAML1031_TARGET_CDE_format_033118.xlsx" from Todd and Rob
+m1 <- read.csv("~/reference_mapping-files/00_Old/TARGET_AML_0531_1031_merged_CDEs_3.01.19.csv")
+```
+
+```{r}
+check <- merged %>% 
+  filter(USI %in% LSC17.1031$USI) %>%
+  select(USI,Reg., EFS.time..days., OS.time..days.,
+         OS.event.ID, EFS.event.type.ID,
+         Year.of.Last.Follow.Up,Protocol,Treatment.Arm) %>% 
+  
+  left_join(., select(m1, USI, Reg.,Event.Free.Survival.Time.in.Days,
+                      Overall.Survival.Time.in.Days,Vital.Status,First.Event, 
+                      Year.of.Last.Follow.Up), 
+            by="USI") %>% 
+  filter(Protocol=="AAML1031") %>% 
+  mutate(OS_Time_Updated=ifelse(OS.time..days. != Overall.Survival.Time.in.Days, "Changed", "Unchanged")) %>% 
+  arrange(Treatment.Arm, OS_Time_Updated)
+
+
+head(check)
+dim(check)
+# table(check$OS_Time_Updated, useNA = "always")
+# write.csv(check, "TARGET_AML_AAML1031_LSC17_Differences_in_CDEs.csv", row.names = FALSE)
+```
+
+
+##For Todd and Rob 
+
+```{r}
+AAML0531 <- LSC17.0531 %>% 
+  select(USI,Reg.,Protocol, LSC17_Group)
+
+
+head(AAML0531)
+table(AAML0531$LSC17_Group)
+# write.csv(AAML0531, "Todd_Rob/TARGET_LSC17_Groups_8.27.19.csv", row.names = FALSE)
+```
+
+```{r}
+AAML1031 <- LSC17.1031.subset %>% 
+  select(USI,Reg.,Protocol, LSC17_Group)
+
+head(AAML1031)
+table(AAML1031$LSC17_Group)
+# write.csv(AAML1031, "Todd_Rob/AAML1031_LSC17_Groups_8.27.19.csv", row.names = FALSE)
+```
+
+
+# Survival Analysis
+
+```{r}
+OS.cols <- c("OS.time..days.", "OS.ID")
+EFS.cols <- c("EFS.time..days.", "Event.ID")
+```
+
+
+
+
+## Colors for Plotting
+
+```{r fig.height=2}
+jco.pal2 <- pal_jco("default")(10)
+jco.palette <- c("#2b71a8","#d8b74b", "#777777","#a06058")
+barplot(rep(1,4), col=jco.palette)
+barplot(rep(1,10), col=jco.pal2)
+```
+
+```{r}
+cc.med <- c("low"=jco.palette[2], "high"=jco.palette[1])
+
+cc.qt <- c("q1"=jco.palette[2], "q2"=jco.palette[3],
+                      "q3"=jco.palette[1],  "q4"=jco.palette[4])
+
+cc.dec <- rev(rainbow(n=10,v=0.75,s=0.9)) %>%
+  set_names(levels(LSC17.1031$LSC17_Deciles))
+
+```
+
+```{r}
+cols <- list("LSC17_Group","LSC17_Quantile","LSC17_Deciles")
+colors <- list(cc.med,cc.qt,cc.dec)
+```
+
+# Kaplan-Meier Plots 
+
+##0531 
+
+```{r}
+res.0531 <- map2(cols, colors, 
+                 KM.plots, df=LSC17.0531,
+                group_vars = NULL,
+                type="OS", 
+                cohort = "1031", 
+                riskTable=TRUE) 
+
+res.0531
+```
+
+```{r fig.width=12, fig.height=8}
+figs.0531.allcomers <- res.0531 %>% 
+  map(function(x) grid.arrange(grobs=list(x$OS[[1]],x$EFS[[1]]), ncol=2))
+
+# lapply(1:3, function(i) ggsave(filename=paste0("AAML0531_",cols[i],"_KM_plot.pdf"),
+#                                plot=figs.0531.allcomers[[i]],
+#                               device = "pdf", width = 12, height = 8, units="in"))
+```
+
+
+##1031
+
+```{r}
+res.1031 <- map2(cols, colors, 
+                 KM.plots, df=LSC17.1031,
+                group_vars = NULL,
+                type="OS", 
+                cohort = "1031", 
+                riskTable=TRUE) 
+
+```
+
+```{r fig.width=12, fig.height=8}
+figs.1031.allcomers <- res.1031 %>% 
+  map(function(x) grid.arrange(grobs=list(x$OS[[1]],x$EFS[[1]]), ncol=2))
+
+# lapply(1:3, function(i) ggsave(filename=paste0("AAML1031_",cols[i],"_IncludeArmC_KM_plot.pdf"),
+#                                plot=figs.1031.allcomers[[i]],
+#                               device = "pdf", width = 12, height = 8, units="in"))
+```
+
+```{r}
+res.1031.sub <- map2(cols, colors, 
+                 KM.plots, df=LSC17.1031.subset, #no Arm C
+                group_vars = NULL,
+                type="OS", 
+                cohort = "1031", 
+                riskTable=TRUE) 
+
+```
+
+```{r fig.width=12, fig.height=8}
+figs.1031.sub <- res.1031.sub %>% 
+  map(function(x) grid.arrange(grobs=list(x$OS[[1]],x$EFS[[1]]), ncol=2))
+
+# lapply(1:3, function(i) ggsave(filename=paste0("AAML1031_",cols[i],"_ExcludeArmC_KM_plot.pdf"),
+#                                plot=figs.1031.sub[[i]],
+#                               device = "pdf", width = 12, height = 8, units="in"))
+```
+
+
+
+#LSC17 Scores in Subgroups
+
+-- Combine AAML0531 + AAML1031 cohorts to perform subgroup analysis:
+-- LSC17 Low versus High (NO quartiles since the numbers get too small)
+-- Data to support the reason(s) for combining the cohorts
+-- Dot plot of LSC17 scores for each subtype graphed together for comparison
+-- Cohorts to consider generating Kaplan-Meier curves:
+  -- Low, intermediate, high cytogenetic/molecular risk group (I would keep this simple and base it on AAML1031 definitions)
+  -- RUNX1-RUNX1T1
+  -- CBFB-MYH11
+  -- KMT2A (it would be really interesting if LSC17 scores correlated with Rhonda's KMT2A data)
+  -- NSD1-NUP98
+  -- KDM5A-NUP98
+  -- CBFA2T3-GLIS2
+  -- FLT3 mutated
+
+
+I know I still owe you a couple “To Do” items that we have discussed: 1) UMAP for the 5 subgroups for whom you’ve create risk classifiers 2) Boxplot+dotplot of the LSC17 scores for KMT2A AML patients divided by high-risk KMT2A vs low-risk KMT2A and 3) OS/EFS KM plots with a curve for RUNX1-RUNX1T1, CBFB-MYH11, KMT2A, NUP98, and CBFA2T3-GLIS2 in 0531 and 1031.  
+
+
+```{r}
+Subgroups <- bind_rows(LSC17.0531, LSC17.1031) %>% 
+  mutate(Subgroups=case_when(
+    grepl("RUNX1-RUNX1T1", Primary.Fusion) |  grepl("RUNX1-RUNX1T1", Additional.Fusions.CNV) ~ "RUNX1-RUNX1T1",
+    grepl("CBFB-MYH11", Primary.Fusion) |  grepl("CBFB-MYH11", Additional.Fusions.CNV) ~ "CBFB-MYH11",
+    grepl("KMT2A", Primary.Fusion) |  grepl("KMT2A", Additional.Fusions.CNV) ~ "KMT2A",
+    grepl("NUP98-NSD1", Primary.Fusion) |  grepl("NUP98-NSD1", Additional.Fusions.CNV) ~ "NUP98",
+    grepl("NUP98-KDM5A", Primary.Fusion) |  grepl("NUP98-KDM5A", Additional.Fusions.CNV) ~ "NUP98",
+    grepl("CBFA2T3-GLIS2", Primary.Fusion) |  grepl("CBFA2T3-GLIS2", Additional.Fusions.CNV) ~ "CBFA2T3-GLIS2",
+        
+    # grepl("DEK-NUP214", Primary.Fusion) |  grepl("DEK-NUP214", Additional.Fusions.CNV) ~ "DEK-NUP214",
+    # grepl("Monosomy 7|monosomy7|del5q", Primary.Fusion) |  grepl("Monosomy 7|monosomy7|del5q", Additional.Fusions.CNV) ~ "Monosomy7 / Del5q",
+        # grepl("none|None", Primary.Fusion) |  grepl("none|None", Additional.Fusions.CNV) ~ "No Fusion",
+    TRUE ~ "None or Other")) %>% 
+  mutate_at(vars(Classical.Risk.group),~ifelse(is.na(.) | grepl("10|30", .), "Unknown", . )) %>% 
+  mutate(KMT2A=case_when(
+    grepl("KMT2A",Primary.Fusion) ~ Primary.Fusion,
+    grepl("KMT2A",Additional.Fusions.CNV) ~ Additional.Fusions.CNV, 
+    TRUE ~ "otherAML")) %>% 
+  
+  #KMT2A Groups
+  group_by(KMT2A)%>%
+  mutate(KMT2A_Clean=case_when(
+   grepl("KMT2A",KMT2A) & n() < 10 ~ "KMT2A-X",
+   TRUE ~ KMT2A)) %>% 
+  ungroup() %>% 
+  mutate(KMT2A=KMT2A_Clean) %>%
+  select(-KMT2A_Clean) %>% 
+  
+  #LSC17 score outcome by Subgroup
+  group_by(Subgroups) %>%
+  mutate(LSC17_Group_withinSubgroups=ifelse(LSC17_Score >= median(LSC17_Score), 
+                                            "high", "low")) %>% 
+  ungroup() %>% 
+  
+  
+  #Cohort (0531/1031) 
+  mutate(Cohort=ifelse(USI %in% LSC17.0531$USI, "Discovery", "Validation")) %>%
+  mutate(KMT2A_Final.Risk=case_when(
+      Subgroups == "KMT2A" & Final.Risk.Group == "High" ~ "High Risk KMT2A", 
+      Subgroups == "KMT2A" & Final.Risk.Group == "Low" ~ "Low Risk KMT2A"), 
+    KMT2A_Cyto.Fus.Risk=case_when(
+      Subgroups == "KMT2A" & Cyto.Fusion.Molecular.Risk_update == "High" ~ "High Risk KMT2A", 
+      Subgroups == "KMT2A" & Cyto.Fusion.Molecular.Risk_update == "Low" ~ "Low Risk KMT2A", 
+      Subgroups == "KMT2A" & Cyto.Fusion.Molecular.Risk_update == "Standard" ~ "Stand. Risk KMT2A"),
+    KMT2A_Classical.Risk=case_when(
+      Subgroups == "KMT2A" & Classical.Risk.group == "High" ~ "High Risk KMT2A", 
+      Subgroups == "KMT2A" & Classical.Risk.group == "Low" ~ "Low Risk KMT2A", 
+      Subgroups == "KMT2A" & Classical.Risk.group == "Standard" ~ "Stand. Risk KMT2A"))
+  
+  
+
+
+table(Subgroups$Subgroups,Subgroups$LSC17_Group, useNA="ifany")
+table(Subgroups$Subgroups,Subgroups$LSC17_Group_withinSubgroups, useNA="ifany")
+# table(Subgroups$FLT3.ITD.positive., useNA="ifany")
+# table(Subgroups$Classical.Risk.group, useNA="ifany")
+# table(Subgroups$MLL, Subgroups$Subgroups)
+# table(Subgroups$KMT2A)
+# table(Subgroups$KMT2A)
+# table(Subgroups$KMT2A_High_Low_Risk, useNA='ifany')
+# table(Subgroups$Cohort, useNA='ifany')
+```
+
+
+
+##Fusions/Translocation Types
+
+Jenny, could you create Kaplan-Meier curves (EFS and OS) for each category within the first box plot (e.g., GLIS2, del(5q)/monosomy 7, NUP98, DEK/NUP214, KMT2A, CBFB-MYH11, RUNX1-RUNX1T1, None or Other) as a function of low versus high LSC17 score?
+
+```{r}
+res.subgroups <- KM.plots(df=filter(Subgroups, Subgroups != "CBFA2T3-GLIS2"), #CBFGLIS is all high LSC17
+                group_vars = "Subgroups",
+                covariate = "LSC17_Group",
+                type="OS", 
+                cohort = "1031",
+                cc = cc.med,
+                riskTable=TRUE) 
+
+
+```
+
+```{r fig.width=10.5, fig.height=6}
+n <- nrow(res.subgroups)
+
+figs.subgroups <-  sapply(1:n,
+                          function(i) grid.arrange(grobs=c(res.subgroups[i,]$OS,res.subgroups[i,]$EFS),
+                                ncol=2))
+
+# lapply(1:n, function(i) ggsave(filename=paste0("LSC17_",gsub("/|\\s","_",res.subgroups$Subgroups[i]),
+#                                                "_0531_1031_KM_plot.pdf"),
+#                                plot=figs.subgroups[[i]],
+#                               device = "pdf", width = 10.5, height = 6, units="in"))
+```
+
+```{r fig.height=5, fig.width=6}
+fit <- survfit(Surv(OS.time..days./365.25, OS.ID) ~ LSC17_Group,
+               data = filter(Subgroups, Subgroups == "CBFA2T3-GLIS2"))
+
+single.line.GLIS2 <-  SurvivalPlot(fit=fit,
+                                   LegendTitle = "",
+                                   timeUnit = "Years",
+                                   colors = cc.med["high"]) +
+  labs(title="OS: CBFA2T3-GLIS2")
+
+single.line.GLIS2
+# ggsave(filename = "LSC17_CBFA2T3.GLIS2_singleLine_OS_KM.pdf",plot = single.line.GLIS2,device = "pdf",height = 5, width = 6)
+```
+
+```{r}
+res.within.subgroups <- KM.plots(df=Subgroups, 
+                group_vars = "Subgroups",
+                covariate = "LSC17_Group_withinSubgroups",
+                type="OS", 
+                cohort = "1031",
+                cc = cc.med,
+                riskTable=TRUE) 
+```
+
+
+```{r fig.width=10.5, fig.height=6}
+n <- nrow(res.within.subgroups)
+figs.within.subgroups <-  sapply(1:n,
+                          function(i) grid.arrange(grobs=c(res.within.subgroups[i,]$OS,
+                                                           res.within.subgroups[i,]$EFS),
+                                ncol=2))
+
+# lapply(1:n, function(i) ggsave(filename=paste0("LSC17_",gsub("/|\\s","_",res.within.subgroups$Subgroups[i]),
+#                                                "_reOrderedMedian_0531_1031_KM_plot.pdf"),
+#                                plot=figs.within.subgroups[[i]],
+#                               device = "pdf", width = 10.5, height = 6, units="in"))
+```
+
+
+```{r}
+res.FLT3 <- KM.plots(df=filter(Subgroups, FLT3.ITD.positive. != "Unknown"), 
+                group_vars = "FLT3.ITD.positive.",
+                covariate = "LSC17_Group",
+                type="OS", 
+                cohort = "1031",
+                cc = cc.med,
+                riskTable=TRUE) 
+```
+
+```{r fig.width=10.5, fig.height=6}
+n <- nrow(res.FLT3)
+figs.FLT3 <-  sapply(1:n,
+                          function(i) grid.arrange(grobs=c(res.FLT3[i,]$OS,res.FLT3[i,]$EFS), 
+                                ncol=2))
+
+# lapply(1:n, function(i) ggsave(filename=paste0("LSC17_FLT3-ITD_",res.FLT3$FLT3.ITD.positive.[i],"_0531_1031_KM_plot.pdf"),
+#                                plot=figs.FLT3[[i]],
+#                               device = "pdf", width = 10.5, height = 6, units="in"))
+```
+
+##KMT2A Alone 
+
+could you create a pair of Kaplan-Meier curves (EFS and OS) that includes each of the KMT2A partners that recapitulates this plot (https://ashpublications.org/blood/article/128/22/1211/95965/Prognostic-Significance-of-11q23-MLL-Fusion)?  Here is a recommended color palette (you can ignore KMT2A-X):
+
+```{r}
+cc.kmt2a <- c("#2b71a8", "#d8b74b", "#777777","#a06058", "#83a6d8", "#20353e") %>% 
+  set_names(unique(filter(Subgroups,KMT2A != "otherAML", KMT2A != "KMT2A-X")$KMT2A))
+
+```
+
+```{r}
+res.KMT2A <- KM.plots(df=filter(Subgroups,KMT2A != "otherAML", KMT2A != "KMT2A-X"), 
+                # group_vars = "KMT2A",
+                covariate = "KMT2A",
+                type="OS", 
+                cohort = "1031",
+                cc = cc.kmt2a,
+                riskTable=TRUE) 
+```
+
+```{r fig.height=7, fig.width=12.5}
+# pdf("KMT2A_byPartner_KM.pdf", height = 8, width = 20)
+grid.arrange(grobs=c(res.KMT2A$OS, res.KMT2A$EFS), ncol=2)
+# dev.off()
+```
+
+##Subgroups OS/EFS by Protocol
+
+```{r}
+table(Subgroups$Subgroups, Subgroups$Cohort)
+```
+
+```{r}
+#Vectorized input to `element_text()` is not officially supported.
+#Use `all_of(col.idx)` instead of `col.idx` to silence this message.
+KM.protocol_6 <- KM.plots(df=Subgroups, 
+                group_vars = "Cohort",
+                covariate = "Subgroups",
+                type="OS", 
+                cohort = "1031",
+                cc = cc.subgroups,
+                riskTable=TRUE) 
+
+
+```
+
+
+```{r fig.height=14, fig.width=14}
+# pdf("TARGET_AML_0531_1031_Subgroups_KM.pdf", height = 14, width = 14)
+grid.arrange(grobs=c(KM.protocol_6$OS,KM.protocol_6$EFS), ncol=2, nrow=2)
+# dev.off()
+```
+
+```{r}
+KM.protocol_5 <- KM.plots(df=filter(Subgroups,Subgroups != "None or Other"), 
+                group_vars = "Cohort",
+                covariate = "Subgroups",
+                type="OS", 
+                cohort = "1031",
+                cc = cc.subgroups[-which(names(cc.subgroups) == "None or Other")],
+                riskTable=TRUE) 
+```
+
+```{r fig.height=14, fig.width=14}
+# pdf("0531_1031_Subgroups_withoutNoneOthers_KM.pdf", height = 14, width = 14)
+grid.arrange(grobs=c(KM.protocol_5$OS,KM.protocol_5$EFS), ncol=2, nrow=2)
+# dev.off()
+```
+
+##Risk Groups
+
+```{r}
+res.RG <- KM.plots(df=filter(Subgroups, Classical.Risk.group != "Unknown"), 
+                group_vars = "Classical.Risk.group",
+                covariate = "LSC17_Group",
+                type="OS", 
+                cohort = "1031",
+                cc = cc.med,
+                riskTable=TRUE) 
+```
+
+```{r fig.width=10.5, fig.height=6}
+n <- nrow(res.RG)
+figs.RG <-  sapply(1:n,
+                          function(i) grid.arrange(grobs=c(res.RG[i,]$OS,res.RG[i,]$EFS), 
+                                ncol=2))
+
+lapply(1:n, function(i) ggsave(filename=paste0("LSC17_RiskGroup_",res.RG$Classical.Risk.group[i],"_0531_1031_KM_plot.pdf"),
+                               plot=figs.RG[[i]],
+                              device = "pdf", width = 10.5, height = 6, units="in"))
+```
+
+```{r}
+res.RG.dataset <- KM.plots(df=filter(Subgroups, Classical_Risk.group != "Unknown"), 
+                group_vars = c("Classical_Risk.group","dataset"),
+                covariate = "LSC17_Group",
+                type="OS", 
+                cohort = "1031",
+                cc = cc.med,
+                riskTable=TRUE) 
+
+res.RG.dataset
+```
+
+```{r fig.width=10.5, fig.height=6}
+n <- nrow(res.RG.dataset)
+figs.RG.dat <-  sapply(1:n,
+                          function(i) grid.arrange(grobs=c(res.RG.dataset[i,]$OS,res.RG.dataset[i,]$EFS), 
+                                ncol=2))
+
+# lapply(1:n, function(i) ggsave(filename=paste0("LSC17_RiskGroup_",figs.RG$[i],"_0531_1031_KM_plot.pdf"),
+#                                plot=figs.RG[[i]],
+#                               device = "pdf", width = 10.5, height = 6, units="in"))
+```
+
+
+```{r}
+#NRG == "New Risk Groups"
+res.NRG <- KM.plots(df=filter(Subgroups, 
+                              Cyto.Fusion.Molecular.Risk_update != "Unknown"), 
+                group_vars = "Cyto.Fusion.Molecular.Risk_update",
+                covariate = "LSC17_Group",
+                type="OS", 
+                cohort = "1031",
+                cc = cc.med,
+                riskTable=TRUE) 
+```
+
+```{r fig.width=10.5, fig.height=6}
+n <- nrow(res.NRG)
+figs.NRG <-  sapply(1:n,
+                    function(i) grid.arrange(grobs=c(res.NRG[i,]$OS,res.NRG[i,]$EFS), ncol=2))
+
+# lapply(1:n, function(i) ggsave(filename=paste0("LSC17_NewRiskGroupAAML1831_",res.NRG$Cyto.Fusion.Molecular.Risk_update[i],
+#                                                "_0531_1031_KM_plot.pdf"),
+#                                plot=figs.NRG[[i]],
+#                                device = "pdf", width = 10.5, height = 6, units="in"))
+```
+
+
+## Q4 vs Q123 in Risk Groups
+
+```{r}
+table(Subgroups$q4_vs_q123, Subgroups$Classical_Risk.group)
+```
+
+```{r}
+res.RG.q4 <- KM.plots(df=filter(Subgroups, Classical_Risk.group != "Unknown"), 
+                group_vars = "Classical_Risk.group",
+                covariate = "q4_vs_q123",
+                type="OS", 
+                cohort = "1031",
+                cc = set_names(cc.med,c("q123","q4")),
+                riskTable=TRUE) 
+```
+
+```{r fig.width=10.5, fig.height=6}
+n <- nrow(res.RG.q4)
+figs.RG.q4 <-  sapply(1:n,
+                          function(i) grid.arrange(grobs=c(res.RG.q4[i,]$OS,res.RG.q4[i,]$EFS), 
+                                ncol=2))
+
+# lapply(1:n, function(i) ggsave(filename=paste0("LSC17_RiskGroup_",res.RG$Classical_Risk.group[i],"_0531_1031_q4vq123_KM_plot.pdf"),
+#                                plot=figs.RG.q4[[i]],
+#                               device = "pdf", width = 10.5, height = 6, units="in"))
+```
+
+```{r}
+res.RG.q4.ds <- KM.plots(df=filter(Subgroups, Classical_Risk.group != "Unknown"), 
+                group_vars = c("Classical_Risk.group","dataset"),
+                covariate = "q4_vs_q123",
+                type="OS", 
+                cohort = "1031",
+                cc = set_names(cc.med,c("q123","q4")),
+                riskTable=TRUE) 
+```
+
+```{r fig.width=10.5, fig.height=6}
+n <- nrow(res.RG.q4.ds)
+figs.RG.q4.ds<-  sapply(1:n,
+                          function(i) grid.arrange(grobs=c(res.RG.q4.ds[i,]$OS,res.RG.q4.ds[i,]$EFS), 
+                                ncol=2))
+
+# lapply(1:n, function(i) ggsave(filename=paste0("LSC17_RiskGroup_",res.RG$Classical_Risk.group[i],"_0531_1031_KM_plot.pdf"),
+#                                plot=figs.RG[[i]],
+#                               device = "pdf", width = 10.5, height = 6, units="in"))
+```
+
+
+#BoxPlot LSC17 Scores in Cytogenetic Groups
+
+```{r fig.width=10, fig.height=5}
+scores.box <- ggplot(data=Subgroups, 
+                     aes(x= Subgroups, y=LSC17_Score)) +
+  geom_boxplot(outlier.shape=NA, width = 0.8, position = position_dodge(width = 2)) +
+  geom_jitter(aes(color=LSC17_Group),alpha=0.5) + 
+  theme_classic() +
+  scale_color_manual(values = cc.med)+ 
+  scale_y_continuous(breaks = seq(-0.8,0.8, by=0.2)) +
+  labs(x="AML Fusion",y="LSC17 Score") +
+  theme(text=element_text(size=20), 
+        axis.text.x = element_text(angle=25, vjust = 1, hjust=1, color="black"),
+        axis.text.y = element_text(color="black"),
+        axis.ticks.length.x = unit(0.33,"cm"),
+        plot.margin = margin(l=2,t=1, unit="cm")) +
+  guides(color = guide_legend(override.aes = list(size=5)))
+
+
+# scores.box
+# ggsave("LSC17_Scores_Combined_0531_1031_2.17.21.pdf",scores.box,device = "pdf", height = 5,width = 10)
+
+```
+
+```{r fig.width=10}
+scores.KMT2A <- ggplot(data=filter(Subgroups,KMT2A != "otherAML"), 
+                     aes(x= KMT2A, y=LSC17_Score)) +
+  geom_boxplot(outlier.shape=NA, width = 0.8, position = position_dodge(width = 2)) +
+  geom_jitter(aes(color=LSC17_Group),alpha=0.5, size=2) + 
+  theme_classic() +
+  scale_color_manual(values = cc.med)+ 
+  scale_y_continuous(breaks = seq(-0.8,0.8, by=0.2)) +
+  labs(x="AML Fusion",y="LSC17 Score") +
+  theme(text=element_text(size=20), 
+        axis.text.x = element_text(angle=25, vjust = 1, hjust=1, color="black"),
+        axis.text.y = element_text(color="black"),
+        axis.ticks.length.x = unit(0.33,"cm"),
+        plot.margin = margin(l=2,t=1, unit="cm")) +
+  guides(color = guide_legend(override.aes = list(size=5)))
+
+
+scores.KMT2A
+# ggsave("LSC17_Scores_Combined_0531_1031_KMT2A_boxplot_2.17.21.pdf",scores.KMT2A,device = "pdf", height = 5,width = 10)
+```
+
+
+```{r}
+scores.FinalRisk.KMT2A <- ggplot(data=filter(Subgroups,KMT2A != "otherAML"), 
+                     aes(x= KMT2A_Final.Risk, y=LSC17_Score)) +
+  geom_boxplot(outlier.shape=NA, width = 0.8, position = position_dodge(width = 2)) +
+  geom_jitter(aes(color=LSC17_Group),alpha=0.5, size=2) + 
+  theme_classic() +
+  scale_color_manual(values = cc.med)+ 
+  scale_y_continuous(breaks = seq(-0.8,0.8, by=0.2)) +
+  labs(x="AML Fusion",y="LSC17 Score") +
+  theme(text=element_text(size=20), 
+        axis.text.x = element_text(angle=25, vjust = 1, hjust=1, color="black"),
+        axis.text.y = element_text(color="black"),
+        axis.ticks.length.x = unit(0.33,"cm"),
+        plot.margin = margin(l=2,t=1, unit="cm")) +
+  guides(color = guide_legend(override.aes = list(size=5)))
+
+
+
+scores.FinalRisk.KMT2A
+# ggsave("LSC17_Scores_Combined_0531_1031_KMT2A_Final.Risk_boxplot_2.17.21.pdf",scores.FinalRisk.KMT2A,device = "pdf", height = 5,width = 7)
+```
+
+```{r}
+table(Subgroups$KMT2A_Cyto.Fus.Risk)
+table(Subgroups$Subgroups, Subgroups$Cyto.Fusion.Molecular.Risk_update)#["KMT2A",]
+```
+
+
+```{r}
+scores.Cyto.FusRisk.KMT2A <- ggplot(data=filter(Subgroups,KMT2A != "otherAML"), 
+                     aes(x= KMT2A_Cyto.Fus.Risk, y=LSC17_Score)) +
+  geom_boxplot(outlier.shape=NA, width = 0.8, position = position_dodge(width = 2)) +
+  geom_jitter(aes(color=LSC17_Group),alpha=0.5, size=2) + 
+  theme_classic() +
+  scale_color_manual(values = cc.med)+ 
+  scale_y_continuous(breaks = seq(-0.8,0.8, by=0.2)) +
+  labs(x="AML Fusion",y="LSC17 Score") +
+  theme(text=element_text(size=20), 
+        axis.text.x = element_text(angle=25, vjust = 1, hjust=1, color="black"),
+        axis.text.y = element_text(color="black"),
+        axis.ticks.length.x = unit(0.33,"cm"),
+        plot.margin = margin(l=2,t=1, unit="cm")) +
+  guides(color = guide_legend(override.aes = list(size=5)))
+
+
+
+scores.Cyto.FusRisk.KMT2A
+# ggsave("LSC17_Scores_Combined_0531_1031_KMT2A_Cyto.Fusion.Risk_boxplot_2.17.21.pdf",scores.Cyto.FusRisk.KMT2A,device = "pdf", height = 5,width = 7)
+```
+
+```{r}
+scores.ClassicRisk.KMT2A <- ggplot(data=filter(Subgroups,KMT2A != "otherAML", !is.na(KMT2A_Classical.Risk)), 
+                     aes(x= KMT2A_Classical.Risk, y=LSC17_Score)) +
+  geom_boxplot(outlier.shape=NA, width = 0.8, position = position_dodge(width = 2)) +
+  geom_jitter(aes(color=LSC17_Group),alpha=0.5, size=2) + 
+  theme_classic() +
+  scale_color_manual(values = cc.med)+ 
+  scale_y_continuous(breaks = seq(-0.8,0.8, by=0.2)) +
+  labs(x="AML Fusion",y="LSC17 Score") +
+  theme(text=element_text(size=20), 
+        axis.text.x = element_text(angle=25, vjust = 1, hjust=1, color="black"),
+        axis.text.y = element_text(color="black"),
+        axis.ticks.length.x = unit(0.33,"cm"),
+        plot.margin = margin(l=2,t=1, unit="cm")) +
+  guides(color = guide_legend(override.aes = list(size=5)))
+
+
+
+scores.ClassicRisk.KMT2A
+# ggsave("LSC17_Scores_Combined_0531_1031_KMT2A_Classical.Risk_boxplot_2.17.21.pdf",scores.ClassicRisk.KMT2A,device = "pdf", height = 5,width = 7)
+```
+
+
+
+```{r fig.width=10, fig.height=5}
+scores.RG <- ggplot(data=filter(Subgroups,  Classical.Risk.group != "Unknown"), 
+                     aes(x= Classical.Risk.group, y=LSC17_Score)) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(aes(color=LSC17_Group),alpha=0.5) + 
+  theme_classic() +
+  scale_color_manual(values = cc.med)+ 
+  # scale_y_continuous(breaks = seq(-0.8,0.8, by=0.2)) +
+  labs(x="Classical Cyto/molecular Risk Group",y="LSC17 Score") +
+  theme(text=element_text(size=20), 
+        axis.text.x = element_text(angle=0, vjust = 0.5, hjust=0.5, color="black"),
+        axis.text.y = element_text(color="black"),
+        plot.margin = margin(l=2,t=1, unit="cm")) +
+  guides(color = guide_legend(override.aes = list(size=5)))
+
+
+scores.RG
+# ggsave("LSC17_Scores_Combined_0531_1031_RiskGroup_boxplot_2.17.21.pdf",scores.RG,device = "pdf", height = 5,width = 10)
+```
+
+
+```{r fig.width=10, fig.height=5}
+scores.FLT3 <- ggplot(data=filter(Subgroups,  FLT3.ITD.positive. != "Unknown", 
+                                  FLT3.ITD.positive. != "<0.1"), 
+                     aes(x= FLT3.ITD.positive., y=LSC17_Score)) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(aes(color=LSC17_Group),alpha=0.5) + 
+  theme_classic() +
+  scale_color_manual(values = cc.med)+ 
+  scale_x_discrete(labels=c("Yes"="Positive", "No"="Negative")) +
+  scale_y_continuous(breaks = seq(-0.8,0.8, by=0.2)) +
+  labs(x="FLT3-ITD Status",y="LSC17 Score") +
+  theme(text=element_text(size=20), 
+        axis.text.x = element_text(angle=0, vjust = 0.5, hjust=0.5, color="black"),
+        axis.text.y = element_text(color="black"),
+        plot.margin = margin(l=2,t=1, unit="cm")) +
+  guides(color = guide_legend(override.aes = list(size=5)))
+
+
+scores.FLT3
+# ggsave("LSC17_Scores_Combined_0531_1031_FLT3_boxplot_2.17.21.pdf",scores.FLT3,device = "pdf", height = 5,width = 10)
+```
+
+
+
+#Waterfall plots Range of the scores
+
+```{r}
+library(ggpubr)
+```
+
+```{r fig.width=7, fig.height=5}
+wplot.0531 <- ggplot(LSC17.0531, aes(x=reorder(USI, LSC17_Score), y=LSC17_Score,
+                      color=LSC17_Group, fill=LSC17_Group)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(),
+        axis.title = element_text(size=16,color="black"),
+        axis.text = element_text(size=14, color="black"),
+        legend.text = element_text(size=14)) + 
+  labs(x="Patient", y="LSC17 Score",title="LSC17 Scores in AAML0531", fill="LSC17 Group",
+       color="LSC17 Group") +
+  scale_color_manual(values=cc.med) +
+  scale_fill_manual(values=cc.med)
+# wplot.0531
+# ggsave("AAML0531_LSC17_Scores_Waterfallplot.pdf",wplot.0531, device = "pdf", height = 5, width = 7)
+```
+
+```{r fig.width=10, fig.height=5}
+wplot.1031 <- ggplot(LSC17.1031, aes(x=reorder(USI, LSC17_Score), y=LSC17_Score,
+                      color=LSC17_Group, fill=LSC17_Group)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  theme(axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(),
+        axis.title = element_text(size=16,color="black"),
+        axis.text = element_text(size=14, color="black"),
+        legend.text = element_text(size=14)) + 
+  labs(x="Patient", y="LSC17 Score",title="LSC17 Scores in AAML1031", fill="LSC17 Group",
+       color="LSC17 Group") +
+  scale_color_manual(values=cc.med) +
+  scale_fill_manual(values=cc.med)
+# wplot.1031
+# ggsave("AAML1031_LSC17_Scores_Waterfallplot.pdf",wplot.1031, device = "pdf", height = 5, width = 10)
+```
+
+```{r fig.width=10}
+ggplot(combo, aes(x=reorder(idx, LSC17_Score), y=LSC17_Score,
+                      color=LSC17_Group)) +
+  geom_bar(stat = "identity", fill="transparent") +
+  theme_numX +
+  theme(axis.text.x = element_blank())
+```
+
+```{r fig.width=7, fig.height=3}
+scores.comb <- ggplot(combined, aes(x=reorder(idx, LSC17_Score), y=LSC17_Score,
+                      color=Protocol)) +
+  geom_bar(stat = "identity", fill="transparent") +
+  theme_numX +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  scale_color_manual(values=c("#A6CEE3","#1F78B4")) +
+  labs(y="LSC17 Score", x="Patient") 
+# scores.comb
+
+scores.sep <- ggplot(combined, aes(x=reorder(idx, LSC17_Score), y=LSC17_Score,
+                      color=Protocol)) +
+  geom_bar(stat = "identity", fill="transparent") +
+  theme_numX +
+  theme(axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        strip.background = element_blank(),
+        strip.text = element_text(size=25)) +
+  facet_wrap( ~ Protocol, drop = TRUE, scales = "free_x") +
+  scale_color_manual(values=c("#A6CEE3","#1F78B4")) +
+  labs(y="LSC17 Score", x="Patient")
+scores.sep
+```
+
+
+```{r fig.width=7, fig.height=5}
+# tiff("TARGET_AML_1031_LSC17_Scores_waterfallplot.tiff", height = 5, width=7, units = "in", res=600)
+ggmatrix(plots = list(scores.sep, scores.comb), 
+         nrow=2, ncol=1, 
+         showYAxisPlotLabels = TRUE,
+         yAxisLabels = c("Individual Cohorts", "Combined Cohort"),
+         switch = "y",
+         ylab = c("LSC17_Score"), 
+         xlab="Patient") +
+    theme(strip.placement = "outside", 
+              strip.background = element_blank(), 
+              strip.text.y = element_text(size=15),
+              strip.text.x = element_text(size=20),
+              axis.title.y  = element_text(size=22),
+              axis.title.x  = element_text(size=22))
+# dev.off()
+```
+
+
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

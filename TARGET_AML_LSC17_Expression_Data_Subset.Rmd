@@ -1,0 +1,272 @@
+---
+title: "LSC17 Expression Data Subset"
+author: "Jenny Smith"
+date: "10/28/2021"
+output: html_document
+---
+
+# Set-up 
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2017.02.28_LSC17_Score"))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+
+library(DeGSEA)
+library(REDCapR)
+# library(keyring) #cannot install non-zero exit 
+
+getwd()
+```
+
+
+# Raw Counts
+
+```{r}
+genome <- "GRCh37"
+```
+
+
+## GRCh37 
+
+```{r}
+if(genome=="GRCh37"){
+  grch37_files <- dir(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/BCCA_GRCh37_Ensembl_v69"),
+                      full.names=TRUE)
+  # grch37_files
+  
+  ##Counts 
+  grch37_cts_file <- grep("dupGenesRemoved_FractionalCounts", grch37_files,value=T)
+  cts_grch37 <- readRDS(file.path(grch37_cts_file))
+
+  gene_ids <- cts_grch37[,c(1:2)]
+  cts_grch37 <- as.data.frame(cts_grch37)
+  rownames(cts_grch37) <- cts_grch37$geneSymbol
+  cts_grch37 <- cts_grch37[,-c(1:2)]
+
+  
+  ##TPM
+  grch37_TPM_file <- grep("dupGenesRemoved_TPM", grch37_files, value = T)
+  TPM_grch37 <- readRDS(file.path(grch37_TPM_file))
+
+  gene_ids <- TPM_grch37[,c(1:2)]
+  TPM_grch37 <- as.data.frame(TPM_grch37)
+  rownames(TPM_grch37) <- TPM_grch37$geneSymbol
+  TPM_grch37 <- TPM_grch37[,-c(1:2)]
+
+  
+  ## 0531 TPM 
+  # polyA_files <-  dir(grch37_files[grep("PolyA", grch37_files)], full.names = TRUE)
+  # TPM_0531_grch37 <- read.csv(file.path(grep("AAML0531_dupGenesRemoved_TPM", polyA_files, value=T)))
+}
+```
+
+
+# ClinData
+
+* I need a dynamic title for each project / subproject
+* I need to use the YAML date object to create a single CDE to be used for the entirety of the project 
+* how can I easily update the project CDEs? 
+
+```{r message=FALSE}
+#https://cran.r-project.org/web/packages/REDCapR/vignettes/workflow-read.html 
+project <- "LSC17_Gene_Expression"
+
+if(project==""){
+  stop("Must include Projecy name!")
+}else{
+  message(paste0("Project is: ",project))
+  current_cde_database <- paste("TARGET_AML_CDEs_For_Project",project, ".RDS", sep="_")
+  
+  if(file.exists(current_cde_database)){
+    print("Reading CDEs from Rdata object.")
+    merged <- readRDS(current_cde_database)
+      
+  }else{
+    print("Downloading CDEs from RedCap API.")
+    path_credential <- file.path(HOME,".redcap")
+    project_id <- 1295
+  
+    credential  <- REDCapR::retrieve_credential_local(
+      path_credential = path_credential,
+      project_id = project_id)
+    
+    #takes about 30 sec to download. 
+    merged <- redcap_read(redcap_uri = credential$redcap_uri, 
+                          token = credential$token, 
+                          raw_or_label_headers = 'label')
+    if(merged$success){
+      merged <- data.frame(merged$data, check.names=TRUE) #remove the white spaces  (will this even work??)
+      saveRDS(merged, current_cde_database)
+    }
+    
+  
+    #Create a simple log file from the day the project starts
+    cat(c(paste("Date:", Sys.Date()),
+          paste("cts:", basename(get(ls(pattern = "_cts_file")))),
+          paste("tpm:", basename(get(ls(pattern = "_TPM_file")))), 
+          paste("CDE:", current_cde_database)),
+          sep = "\n", 
+          file = paste(project, Sys.Date(), ".log", sep="_"))
+    
+  }
+  
+  #keep a list of the ineligable patiens to remove if necessary
+  inelig <- merged %>% 
+    filter(Eligibility.Comments == "remove") %>% 
+    pull(USI)
+  
+  #Filter those with USIs and are eligible for the study
+  merged <- merged %>% 
+    filter(Eligibility.Comments != "remove")
+  
+  
+  dim(merged) 
+  head(merged)
+}
+```
+
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_08.12.21.csv")) 
+
+dim(sample_info)
+```
+
+```{r}
+LSC.data <- read.csv("TARGET/TARGET_1031_CDE_withLSC17Score_2.17.21.csv")
+
+
+dim(LSC.data)
+head(LSC.data[,1:5])
+```
+
+
+# Select Samples
+
+```{r}
+sample_dx <- sample_info %>% 
+  filter(grepl("diagnostic", Time_point), 
+         Protocol=="AAML1031") %>% 
+  filter(USI %in% LSC.data$USI) %>% 
+  filter(!grepl("_replicate", Sample))
+
+
+head(sample_dx)
+# dim(sample_dx) #1061  18
+```
+
+
+```{r}
+length(unique(sample_dx$USI))
+length(unique(LSC.data$USI))
+```
+
+# Subset the Expression Data 
+
+
+```{r}
+LSC.genes <- read.csv("104_LSC17_Genes_withBiotypes.csv",check.names = FALSE) %>% 
+  left_join(.,read.csv("104_LSC17_Genes.ocr.csv", check.names=FALSE), 
+            by=c("NCBI gene (formerly Entrezgene) ID"="Entrez ID")) %>% 
+  janitor::clean_names() %>% 
+  mutate_at(vars(gene_symbol), ~gsub("\\s", "", toupper(.))) %>% 
+  select(-gene_name)
+
+
+head(LSC.genes)
+dim(LSC.genes) #104   9
+# table(LSC.genes$signature_gene) #
+length(unique(LSC.genes$gene_symbol)) #97 unique gene symbols
+```
+
+```{r}
+LSC17.alias <- read.csv("LSC17_Genes_Coeff_update.csv", row.names = 1)
+LSC17.alias[LSC17.alias$LSC_alias!="",]
+```
+
+```{r}
+found <- gene_ids %>% 
+  select(gene_id, gene_alias=geneSymbol) %>% 
+  filter(gene_id %in% LSC.genes$gene_stable_id) %>% 
+  left_join(.,LSC.genes, by=c("gene_id"="gene_stable_id"))
+  
+
+table(LSC17.alias$gene_id %in% found$gene_id) #OK 
+table(LSC.genes$gene_symbol %in% found$gene_alias)
+
+# missing <- LSC.genes %>% 
+#   filter(!gene_stable_id %in% gene_ids$gene_id)
+# # missing
+
+# write.csv(found,"LSC17_gene_ids_fold_changes.csv", row.names = FALSE)
+```
+
+```{r}
+# possible_dups <- LSC.genes %>% 
+#   filter(!gene_stable_id %in% found$gene_id) 
+# 
+# 
+# all_dups <- LSC.genes %>% 
+#   filter(duplicated(gene_symbol) | duplicated(gene_symbol, fromLast = TRUE))
+# 
+# 
+# table(possible_dups$gene_symbol %in% all_dups$gene_symbol)
+```
+
+```{r}
+LSC.expression <- TPM_grch37[found$gene_alias,sample_dx$Sample] %>% 
+  rownames_to_column("gene_alias") %>% 
+  left_join(found, ., by=c("gene_alias"))
+
+
+dim(LSC.expression)
+
+# head(LSC.expression[,1:15])
+
+# write.csv(LSC.expression,"TARGET_AML_LSC_Gene_Expression_GRCh37_TPM.csv", row.names = FALSE)
+```
+
+```{r}
+LSC.expression %>% 
+  # filter(grepl("FAM",gene_alias)) %>% 
+  # filter(gene_id=="ENSG00000226777") %>% 
+  filter(grepl("LSC17", signature_gene)) %>% 
+  select(1:10)
+```
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

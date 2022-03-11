@@ -1,0 +1,385 @@
+---
+title: "LSC17 in TCGA AML"
+author: "Jenny Smith"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+Jenny Smith 
+February 28, 2017 
+
+Purpose: To determine the level of stemmness for pediatric AML patients from RNAseq data using LSC17 gene score. 
+
+References: Nature. 2016 Dec 15;540(7633):433-437. doi: 10.1038/nature20598. Epub 2016 Dec 7.
+
+
+LSC17_formula = (DNMT3B x 0.0874) + (ZBTB46 x -0.0347) + (NYNRIN x 0.00865) + (ARHGAP22 x -0.0138) + (LAPTM4B x 0.00582) + 
+(MMRN1 x 0.0258) + (DPYSL3 x 0.0284) + (KIAA0125 x 0.0196) + (CDK6 x -0.0704) + (CPXM1 x -0.0258) + (SOCS2 x 0.0271) + (SMIM24 x -0.0226) + (EMP1 x 0.0146) + (NGFRAP1 x 0.0465) + (CD34 x 0.0338) + (AKR1C3 x -0.0402) + (GPR56 x 0.0501)
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE, fig.align='center', message=FALSE)
+knitr::opts_knit$set(root.dir = '~/RNA_seq_Analysis/2017.02.28_LSC17_Score/TCGA/')
+options(stringsAsFactors = FALSE)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(survival)
+library(survminer)
+library(RColorBrewer)
+library(colorspace)
+library(stringr)
+
+library(Biobase)
+library(dplyr)
+library(tibble)
+library(readr)
+library(purrr)
+
+
+library(ggplot2)
+library(GGally)
+library(gridExtra)
+library(grid)
+library(gtools)
+getwd()
+```
+
+#Prepare the LSC17 Gene Signature Calulations and survival plot functions
+
+```{r message=FALSE}
+source("~/scripts/RNAseq_Analysis/LSC17_scores/LSC17_Score_Function_10May2017.r")
+source("~/scripts/survival_analysis/Survplot_Functions_2018.10.24.r")
+# source("~/scripts/RNAseq_Analysis/LSC17_scores/KM_CustomPlots_Function.r")
+```
+
+
+#Prepare the RPKM Expression Data
+
+```{r}
+#Use RPKM values to be consistent with the literature. 
+TCGA_RPKM <- read_csv("/fh/fast/meshinchi_s/workingDir/TCGA/GDAC_LAML_TCGA/RNA/mRNAseq/level3/gene/2016.02.12_BCCA_Illumina_data/LAML_TCGA_RPKM_geneExpression.csv")[,-1]
+
+head(TCGA_RPKM[,1:5])
+dim(TCGA_RPKM) #179 patients with 20,442 genes represented. 
+```
+
+```{r}
+#Update the gene symbol column. 
+TCGA_RPKM$geneSymbol <- gsub("([A-Z]+.+)\\|.+","\\1", TCGA_RPKM$geneSymbol)
+
+#Keep only unique gene symbols. LSC17 genes have only one entry so no need to select one with highest expression.  
+TCGA_RPKM <- TCGA_RPKM[which(!duplicated(TCGA_RPKM$geneSymbol)), ]
+TCGA_RPKM <- as.data.frame(TCGA_RPKM) #otherwise get error Setting row names on a tibble is deprecated.
+rownames(TCGA_RPKM) <- TCGA_RPKM$geneSymbol
+TCGA_RPKM <- TCGA_RPKM[,-1]
+
+
+head(TCGA_RPKM[,1:5], 10)
+```
+
+
+#Log2 transform 
+
+```{r}
+#log2 RPKM values used in the literature. 
+log2_TCGA <- as.data.frame(apply(TCGA_RPKM, 2, function(x) log2(x + 1)))
+```
+
+```{r}
+# Update the colnames to be only the patient ID. TCGA.AB.2803.03A.01T.0734.13.2
+colnames(log2_TCGA) <- gsub("T.+AB.([0-9]{4}).[0-9]+[A,B].+", "\\1", colnames(log2_TCGA))
+
+head(log2_TCGA[,1:5])
+```
+
+
+#Distribution of log2 Expn Values 
+
+```{r}
+colors = rainbow_hcl(17)
+# mar=c(bottom,left,top, right)
+
+par(pty="m", las=2, mar=c(5,4,5,2))
+boxplot(t(log2_TCGA[match(LSC17_dfB$LSC_genes, rownames(log2_TCGA)), ]), col=colors, cex.axis = 0.85)
+title(main = "Distribution of Gene Expression for LSC17 Genes \n in TCGA Cohort", line=1.5, cex.main = 0.8, ylab = "Log2 RPKM", cex.lab=0.75)
+```
+
+
+#Clinical Data Set Munging
+
+```{r}
+clinData1 <- read.csv("~/RNA_seq_Analysis/2017.02.28_LSC17_Score/TCGA/TCGA_AML_clinical_patient_laml.csv", header = TRUE)
+
+head(clinData1[,1:5])
+```
+
+```{r}
+clinData2 <- read.csv("~/RNA_seq_Analysis/2017.02.28_LSC17_Score/TCGA/TCGA_AML_SuppTable01.csv", header = TRUE)
+
+head(clinData2[,1:5])
+```
+
+```{r}
+clinData <- NULL
+clinData <- data.frame(clinData1$bcr_patient_barcode,
+                       clinData1$patient_id,
+                       clinData1$age_at_initial_pathologic_diagnosis, 
+                       clinData1$vital_status,
+                       clinData1$acute_myeloid_leukemia_calgb_cytogenetics_risk_category,
+                       clinData1$lab_procedure_blast_cell_outcome_percentage_value,
+                       clinData1$leukemia_french_american_british_morphology_code, 
+                       clinData1$molecular_analysis_abnormality_testing_result,
+                       clinData1$prior_diagnosis)
+```
+
+```{r}
+clinData <- merge(clinData,clinData2[,c(2,11,15,18,19,20,21,23,24)], by.x = "clinData1.patient_id", 
+                  by.y = "TCGA.Patient.ID")
+
+# head(clinData)
+dim(clinData)
+```
+
+```{r}
+#Change to the numeric values.
+clinData$clinData1.vital_status <- ifelse(clinData$clinData1.vital_status == "LIVING", 0, 1)
+
+#create an EFS Event colums
+clinData$first.event <- ifelse(clinData$EFS.months....3.31.12 != clinData$OS.months..3.31.12 | clinData$clinData1.vital_status == 1, 1, 0)
+
+rownames(clinData) <- clinData$clinData1.patient_id
+head(clinData[,1:5])
+```
+
+```{r}
+dim(clinData)  #200  18
+```
+
+
+
+#Clinical Data  - remove patients from list who do not meet criteria. 
+
+```{r}
+#Patients with no treatments. 
+noTrt <- subset(clinData2, grepl("no treatment", clinData2$Induction))$TCGA.Patient.ID
+#patients without AML (these are aPML and CML patients)
+PML <- subset(clinData2, grepl("PML-RARA", clinData2$Molecular.Classification))$TCGA.Patient.ID
+CML <- subset(clinData2, grepl("BCR-ABL1", clinData2$Molecular.Classification))$TCGA.Patient.ID
+```
+
+```{r}
+#concatenate the list of patient IDs
+excluded <- as.character(unique(c(noTrt, PML, CML)))
+length(excluded) #29 patients removed 
+```
+
+```{r}
+#subset the survival data to remove those cases identified above. 
+clinData_subset <- clinData[which(!rownames(clinData) %in% excluded),]
+dim(clinData_subset) #171  18
+```
+
+
+
+#Calculate the LSC17 Scores for All TCGA AML (including CML, aPML)
+
+```{r}
+labs <- rep(paste0(seq(0,100,by=10), "%"), each=2)
+labs <- labs[-c(1,22)]
+idx <- seq(1,20,by=2)
+labs <- sapply(idx, function(x) paste(labs[x], labs[x+1], sep="-"))
+labs
+```
+
+
+```{r}
+TCGA_survData <- LSC17Groups(clinData = clinData,
+                             ExpnData = log2_TCGA)
+
+TCGA_survData <- LSC3Groups(clinData = TCGA_survData, 
+                            ExpnData = log2_TCGA) %>% 
+  arrange(desc(LSC17_Score)) %>% 
+  
+  mutate(LSC17_Deciles=cut(LSC17_Score,
+         breaks = quantile(LSC17_Score, probs = seq(0,1,length.out = 11), type=5),
+         labels =  labs,
+         include.lowest=TRUE)) %>%
+  
+  mutate(LSC17_Group = relevel(as.factor(LSC17_Group), ref="low"),
+         LSC17_Quantile=factor(LSC17_Quantile, levels = paste0("q",1:4)), 
+         LSC17_Deciles=factor(LSC17_Deciles, levels = labs)) %>% 
+  
+  #LSC17 Scores  of patients with low ages (from median) 
+  mutate(Age.GT.60yrs=ifelse(clinData1.age_at_initial_pathologic_diagnosis >= 60,
+                             "GE.60yrs","LT.60yrs")) %>% 
+  
+  group_by(Age.GT.60yrs) %>% 
+  mutate(LSC17_Group_byAge=quantcut(LSC17_Score,q = 2,labels=c("low","high")))
+
+
+
+# head(TCGA_survData[,c(1,19:21)])
+dim(TCGA_survData)
+```
+
+```{r}
+addmargins(table(TCGA_survData$Age.GT.60yrs, TCGA_survData$LSC17_Group_byAge, useNA="always"))
+
+addmargins(table(TCGA_survData$Age.GT.60yrs, TCGA_survData$LSC17_Group, useNA="always"))
+```
+
+```{r}
+# write.csv(TCGA_survData, file = "TCGA_AML_LSC17_SurvivalData_8.26.19.csv")
+```
+
+
+#Calculate the LSC17 Scores for only AML 
+
+```{r}
+TCGA_survData_subset <- LSC17Groups(clinData = clinData_subset, 
+                                    ExpnData = log2_TCGA)
+
+TCGA_survData_subset <- LSC3Groups(clinData = TCGA_survData_subset,
+                                   ExpnData = log2_TCGA) %>% 
+  arrange(desc(LSC17_Score)) %>% 
+  
+  mutate(LSC17_Deciles=cut(LSC17_Score,
+         breaks = quantile(LSC17_Score, probs = seq(0,1,length.out = 11), type=5),
+         labels =  labs,
+         include.lowest=TRUE)) %>%
+  
+  mutate(LSC17_Group = relevel(as.factor(LSC17_Group), ref="low"),
+         LSC17_Quantile=factor(LSC17_Quantile, levels = paste0("q",1:4)), 
+         LSC17_Deciles=factor(LSC17_Deciles, levels = labs)) %>% 
+  
+  #LSC17 Scores  of patients with low ages (from median) 
+  mutate(Age.GT.60yrs=ifelse(clinData1.age_at_initial_pathologic_diagnosis >= 60,
+                             "GE.60yrs","LT.60yrs") %>% 
+           factor(., levels=c("LT.60yrs","GE.60yrs"))) %>% 
+  
+  group_by(Age.GT.60yrs) %>% 
+  mutate(LSC17_Group_byAge=quantcut(LSC17_Score,q = 2,labels=c("low","high")))
+
+head(TCGA_survData_subset[,c(1,19:23)])
+# TCGA_survData_subset
+dim(TCGA_survData_subset)  #155 patients 
+```
+
+```{r}
+# write.csv(TCGA_survData_subset, "TCGA_AML_LSC17_SurvivalData_subset_2019.08.26.csv", row.names = TRUE)
+```
+
+
+#Bar Plot of the Scores 
+
+```{r}
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/R/in_progress/ggplot_Themes_Function.r")
+```
+
+```{r}
+jco.palette <- c("#2b71a8","#d8b74b", "#777777","#a06058")
+```
+
+```{r}
+# pdf("TCGA_LSC17_Score_WaterfallPlot.pdf", height = 5, width = 7)
+ggplot(TCGA_survData_subset, aes(x=reorder(TCGA_survData_subset$clinData1.patient_id,
+                                           TCGA_survData_subset$LSC17_Score), 
+                                 y=LSC17_Score, fill=LSC17_Group, 
+                                 color=LSC17_Group)) +
+  geom_bar(stat="identity", position = position_dodge()) +
+  scale_y_continuous(breaks = seq(-0.5,1, by=0.25))+
+  theme_JS +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank()) +
+  labs(x="Patient") + 
+  scale_color_manual(values=c("high"=jco.palette[1],"low"=jco.palette[2])) +
+  scale_fill_manual(values=c("high"=jco.palette[1],"low"=jco.palette[2]))
+# dev.off()
+```
+
+
+#Kaplan Meier-Curves
+
+```{r}
+cc.med <- c("low"=jco.palette[2], "high"=jco.palette[1])
+
+cc.qt <- c("q1"=jco.palette[2], "q2"=jco.palette[3],
+                      "q3"=jco.palette[1],  "q4"=jco.palette[4])
+
+cc.dec <- rev(rainbow(n=10,v=0.75,s=0.9)) %>%
+  set_names(labs)
+
+```
+
+```{r}
+cols <- list("LSC17_Group","LSC17_Quantile","LSC17_Deciles")
+colors <- list(cc.med,cc.qt,cc.dec)
+```
+
+
+## AML Patients
+
+```{r}
+res.AML <- map2(cols, colors, 
+                KM.plots,
+                df=TCGA_survData_subset,
+                group_vars = NULL,
+                type="OS",
+                cohort = "TCGA", 
+                riskTable=TRUE) 
+```
+
+```{r fig.width=12, fig.height=8}
+figs.AML <- res.AML %>% 
+  map(function(x) grid.arrange(grobs=list(x$OS[[1]],x$EFS[[1]]), ncol=2))
+
+lapply(1:3, function(i) ggsave(filename=paste0("LAML_",cols[i],"_KM_plot.pdf"),
+                               plot=figs.AML[[i]],
+                              device = "pdf", width = 12, height = 8, units="in"))
+```
+
+
+##Split by Age
+
+```{r}
+res.Age <- map2(cols, colors, 
+                KM.plots,
+                df=TCGA_survData_subset,
+                group_vars = "Age.GT.60yrs",
+                type="OS",
+                cohort = "TCGA", 
+                riskTable=TRUE) 
+
+summary(res.Age)
+```
+
+```{r}
+table(TCGA_survData_subset$Age.GT.60yrs)
+
+c(res.Age[[1]]$OS,res.Age[[1]]$EFS)
+```
+
+```{r fig.width=10, fig.height=14}
+figs.AML <- res.Age %>%
+  map(function(x) grid.arrange(grobs=c(x$OS,x$EFS), ncol=2))
+
+# lapply(1:3, function(i) ggsave(filename=paste0("LAML_",cols[i],"_byAge_KM_plot.pdf"),
+#                                plot=figs.AML[[i]],
+#                               device = "pdf", width = 10, height = 13, units="in"))
+```
+
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+

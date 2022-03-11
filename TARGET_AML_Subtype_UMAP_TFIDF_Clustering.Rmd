@@ -1,0 +1,645 @@
+---
+title: "UMAP Clustering of Ribodepleted RNA-seq"
+author: "Jenny Smith"
+date: "8/20/20"
+output: html_document
+---
+
+
+#Set-up
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME, '2017.02.28_LSC17_Score/TARGET/'))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+# options(stringsAsFactors = FALSE,bitmapType = 'cairo')
+# grDevices::X11.options(type='cairo')
+```
+
+```{r message=FALSE}
+library(DESeq2)
+library(edgeR)
+# library(seqGlue)
+# library(apeglm)
+
+library(ggplot2)
+library(ggrepel)
+# library(ggsci)
+library(RColorBrewer)
+library(readr)
+library(dplyr)
+library(magrittr)
+library(tibble)
+library(tidyr)
+library(data.table)
+library(stringr)
+library(readr)
+library(tools)
+library(gridExtra)
+
+# library(m3addon)
+# library(jackstraw)
+library(DeGSEA)
+getwd()
+```
+
+```{r}
+# source(file.path(SCRIPTS,"survival_analysis/Survplot_Functions_2018.10.24.r"))
+# source(file.path(SCRIPTS,"RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/R/UMAP_workflow.R"))
+# source(file.path(SCRIPTS,"RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/R/UMAP_workflow_find_markers.R"))
+```
+
+
+
+#Read in the Clinical Data
+
+From Todd/Rob at COG
+The four patients who did not consent to banked specimen research and with LSC17 results are: 773920, 775026, 786948, 799528.
+
+file.path()
+
+```{r}
+nup.grps <- read.csv(file.path(PROJHOME,"2020.03.26_NUP98.Rearranged_Collab/TARGET_AML_NUP98.rearranged_Cleaned_Groups_REG_7.15.2020.csv"),
+                   na.strings = c("N/A","#N/A","NA","^$", "^\\.$")) %>%
+  mutate(Reg.=as.character(Reg.))
+
+dim(nup.grps) #2396  140
+# tail(nup.grps)
+# table(!grepl("^P",nup.grps$USI))
+```
+
+```{r}
+CDEs <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_9.18.20.csv"),
+                   na.strings = c("N/A","#N/A","NA","^$", "^\\.$")) %>% 
+  mutate(Reg.=as.character(Reg.))
+
+CDEs <- CDEs %>%  
+  dplyr::filter(Reg. %in% nup.grps$Reg.) %>% 
+  inner_join(., dplyr::select(nup.grps,-USI,-Protocol), by="Reg.")
+
+dim(CDEs) #2396  140
+head(CDEs)
+```
+
+```{r}
+table(CDEs$NUP98.Rearranged.Groups, useNA='ifany')
+```
+
+
+
+```{r}
+merged <- read.csv(file.path(CDE,"/Merged/TARGET_AML_0531_1031_merged_CDEs_7.08.20.csv")) %>% 
+  filter(!is.na(USI), USI != "Unknown") %>% 
+  set_rownames(.$USI)
+
+head(merged[,1:5])
+dim(merged) #2179  138
+sum(duplicated(merged$USI))
+```
+
+```{r}
+#Keep for ID mapping Reg and USI for ineligable pts
+toRemove <- merged %>% 
+  filter(Reg. %in% c(773920,775026, 786948,799528)) %>% 
+  select(Reg.,USI, Protocol)
+toRemove
+```
+
+```{r}
+merged <- merged %>% 
+  filter(!USI %in% toRemove[["USI"]]) %>% 
+  set_rownames(.$USI)
+
+# head(merged[,1:5])
+dim(merged)  #2175  138
+```
+
+
+
+# Raw Counts 
+
+```{r}
+cts <- read_csv("~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_AAML0531_dupGenesRemoved_FractionalCounts.csv") %>%
+  select(-matches("\\.1|^BM|^RO")) %>%
+  select(gene=X1, which(colnames(.) %in% merged$USI)) %>%
+  column_to_rownames("gene")
+
+dim(cts)
+head(cts[,1:5]) #51573   442
+# write.csv(cts,"TARGET_AML_0531_dupGenesRemoved_FractionalCounts.csv", row.names = TRUE)
+```
+
+```{r}
+cts_1031 <- read_csv(file.path(HOME, "0000.00.03_Expression_Matrices/TARGET_AML_0531_1031_Ribodepleted_RNAseq_dupGenesRemoved_FractionalCounts.csv")) %>%
+  select(-matches("replicate|sort|MV4|^Kas|MPN[0-9]")) %>%
+  set_colnames(c("gene",str_split_fixed(colnames(.)[-1],
+                                        pattern = "\\.", n=4)[,3])) 
+
+head(cts_1031[,1:5])
+dim(cts_1031) #51573 1461
+
+cts.1031 <- cts_1031 %>%
+  select(which(!colnames(.) %in% colnames(cts))) %>% #No overlapping patients
+  select(gene,which(colnames(.) %in%
+                      filter(merged,Protocol=="AAML1031", !is.na(OS.time..days.))$USI)) %>%
+  column_to_rownames("gene")
+
+dim(cts.1031) #51573  1061
+head(cts.1031[,1:5])
+
+
+# rm(cts_1031)
+# write.csv(cts.1031,"TARGET_AML_1031_Ribodepleted_RNAseq_dupGenesRemoved_FractionalCounts.csv")
+```
+
+## 1031
+
+```{r}
+LSC17.1031 <- read.csv("TARGET_1031_CDE_withLSC17Score_9.4.19.csv") %>% 
+    mutate(Subgroups=case_when(
+    grepl("RUNX1-RUNX1T1", Primary.Fusion.CNV) |  grepl("RUNX1-RUNX1T1", Additional.Fusions.CNV) ~ "RUNX1-RUNX1T1",
+    grepl("CBFB-MYH11", Primary.Fusion.CNV) |  grepl("CBFB-MYH11", Additional.Fusions.CNV) ~ "CBFB-MYH11",
+    grepl("KMT2A", Primary.Fusion.CNV) |  grepl("KMT2A", Additional.Fusions.CNV) ~ "KMT2A",
+    grepl("NUP98-NSD1", Primary.Fusion.CNV) |  grepl("NUP98-NSD1", Additional.Fusions.CNV) ~ "NUP98",
+    grepl("NUP98-KDM5A", Primary.Fusion.CNV) |  grepl("NUP98-KDM5A", Additional.Fusions.CNV) ~ "NUP98",
+    grepl("CBFA2T3-GLIS2", Primary.Fusion.CNV) |  grepl("CBFA2T3-GLIS2", Additional.Fusions.CNV) ~ "CBFA2T3-GLIS2",
+        
+    # grepl("DEK-NUP214", Primary.Fusion.CNV) |  grepl("DEK-NUP214", Additional.Fusions.CNV) ~ "DEK-NUP214",
+    # grepl("Monosomy 7|monosomy7|del5q", Primary.Fusion.CNV) |  grepl("Monosomy 7|monosomy7|del5q", Additional.Fusions.CNV) ~ "Monosomy7 / Del5q",
+        # grepl("none|None", Primary.Fusion.CNV) |  grepl("none|None", Additional.Fusions.CNV) ~ "No Fusion",
+    TRUE ~ "None or Other")) %>% 
+  mutate_at(vars(Classical.Risk.group),~ifelse(is.na(.) | grepl("10|30", .), "Unknown", . )) %>% 
+  mutate(KMT2A=case_when(
+    grepl("KMT2A",Primary.Fusion.CNV) ~ Primary.Fusion.CNV,
+    grepl("KMT2A",Additional.Fusions.CNV) ~ Additional.Fusions.CNV, 
+    TRUE ~ "otherAML")) %>% 
+  
+  #KMT2A Groups
+  group_by(KMT2A)%>%
+  mutate(KMT2A_Clean=case_when(
+   grepl("KMT2A",KMT2A) & n() < 10 ~ "KMT2A-X",
+   TRUE ~ KMT2A)) %>% 
+  ungroup() %>% 
+  mutate(KMT2A=KMT2A_Clean) %>%
+  select(-KMT2A_Clean)
+
+
+dim(LSC17.1031) #1061 patients, 147 columns
+# head(LSC17.1031[,135:145])
+```
+
+
+## 0531 
+
+```{r}
+ LSC17.0531 <- read.csv("TARGET_0531_CDE_withLSC17Score_10.21.19.csv") %>% 
+    mutate(Subgroups=case_when(
+    grepl("RUNX1-RUNX1T1", Primary.Fusion.CNV) |  grepl("RUNX1-RUNX1T1", Additional.Fusions.CNV) ~ "RUNX1-RUNX1T1",
+    grepl("CBFB-MYH11", Primary.Fusion.CNV) |  grepl("CBFB-MYH11", Additional.Fusions.CNV) ~ "CBFB-MYH11",
+    grepl("KMT2A", Primary.Fusion.CNV) |  grepl("KMT2A", Additional.Fusions.CNV) ~ "KMT2A",
+    grepl("NUP98-NSD1", Primary.Fusion.CNV) |  grepl("NUP98-NSD1", Additional.Fusions.CNV) ~ "NUP98",
+    grepl("NUP98-KDM5A", Primary.Fusion.CNV) |  grepl("NUP98-KDM5A", Additional.Fusions.CNV) ~ "NUP98",
+    grepl("CBFA2T3-GLIS2", Primary.Fusion.CNV) |  grepl("CBFA2T3-GLIS2", Additional.Fusions.CNV) ~ "CBFA2T3-GLIS2",
+        
+    # grepl("DEK-NUP214", Primary.Fusion.CNV) |  grepl("DEK-NUP214", Additional.Fusions.CNV) ~ "DEK-NUP214",
+    # grepl("Monosomy 7|monosomy7|del5q", Primary.Fusion.CNV) |  grepl("Monosomy 7|monosomy7|del5q", Additional.Fusions.CNV) ~ "Monosomy7 / Del5q",
+        # grepl("none|None", Primary.Fusion.CNV) |  grepl("none|None", Additional.Fusions.CNV) ~ "No Fusion",
+    TRUE ~ "None or Other")) %>% 
+  mutate_at(vars(Classical.Risk.group),~ifelse(is.na(.) | grepl("10|30", .), "Unknown", . )) %>% 
+  mutate(KMT2A=case_when(
+    grepl("KMT2A",Primary.Fusion.CNV) ~ Primary.Fusion.CNV,
+    grepl("KMT2A",Additional.Fusions.CNV) ~ Additional.Fusions.CNV, 
+    TRUE ~ "otherAML")) %>% 
+  
+  #KMT2A Groups
+  group_by(KMT2A)%>%
+  mutate(KMT2A_Clean=case_when(
+   grepl("KMT2A",KMT2A) & n() < 10 ~ "KMT2A-X",
+   TRUE ~ KMT2A)) %>% 
+  ungroup() %>% 
+  mutate(KMT2A=KMT2A_Clean) %>%
+  select(-KMT2A_Clean)
+
+dim(LSC17.0531) #442 patients, 145 columns
+# head(LSC17.0531[,135:145])
+```
+
+```{r}
+table(LSC17.0531$Subgroups)
+
+table(LSC17.1031$Subgroups)
+```
+
+
+
+#Define Samples 
+
+```{r}
+sample_info <- read.csv(file.path(TARGET,"SequencingDataMatrix/TARGET_AML_Ribodepleted_Master_Manifest_8.5.20.csv"),
+                        row.names = 1) %>% 
+  inner_join(., select(LSC17.1031, -Primary.Fusion.CNV,-Additional.Fusions.CNV,-Reg.,-Protocol), 
+             by=c("USI")) %>%
+  filter(Time_point=="diagnostic", !grepl("replicate", Sample)) %>%
+  set_rownames(.$USI)
+
+
+
+dim(sample_info) #1061  158
+head(sample_info)
+```
+
+```{r}
+table(sample_info$Subgroups, useNA='ifany')
+table(sample_info$Batch)
+```
+
+```{r}
+Cols <- c("Subgroups",
+          "Batch","Time_point","Tissue",
+          "Age.Category","M7_AML",
+          "Protocol")
+
+all(Cols %in% colnames(sample_info))
+```
+
+
+#Colors for Plotting
+
+```{r fig.height=2}
+jco.pal2 <- pal_jco("default")(10)
+jco.palette <- c("#2b71a8","#d8b74b", "#777777","#a06058")
+barplot(rep(1,4), col=jco.palette)
+barplot(rep(1,10), col=jco.pal2)
+```
+
+
+```{r fig.height=2, fig.width=15}
+colors37 = c("#466791","#60bf37","#953ada","#4fbe6c","#ce49d3","#a7b43d","#5a51dc","#d49f36","#552095","#507f2d","#db37aa","#84b67c","#a06fda","#df462a","#5b83db","#c76c2d","#4f49a3","#82702d","#dd6bbb","#334c22","#d83979","#55baad","#dc4555","#62aad3","#8c3025","#417d61","#862977","#bba672","#403367","#da8a6d","#a79cd4","#71482c","#c689d0","#6b2940","#d593a7","#895c8b","#bd5975")
+
+# barplot(rep(1,37), col=colors37, names.arg = colors37, las=2)
+```
+
+```{r fig.height=2}
+cc <- list()
+cc[["Subgroups"]] <- jco.pal2[1:6] %>% 
+  set_names(unique(sample_info$Subgroups)) 
+cc <- c(cc, colorCodes_aheatmap(df=select(sample_info, Cols[-1])))
+# cc 
+
+
+barplot(rep(1,length(cc$Subgroups)),
+        col=cc$Subgroups,
+        names.arg=names(cc$Subgroups),
+        las=2)
+
+# saveRDS(cc,"Figures/UMAP_LSC17_ColorCodes_8.01.20.RDS")
+```
+
+
+
+#UMAP Diagnostic Only
+
+```{r}
+cts_in <- cts.1031[, sample_info$USI]
+dge <- DGEList(cts_in)
+dge <- calcNormFactors(dge)
+keep <- rowSums(cpm(dge, log = FALSE, normalized.lib.sizes = TRUE) >= 1.0) >= 100
+cts_in <- as.matrix(cts_in[keep,])
+
+
+rm(dge)
+dim(cts_in) #18,368  1061
+```
+
+https://cran.r-project.org/web/packages/tidytext/vignettes/tf_idf.html
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6101073/
+
+```{r}
+tf_idf_transform <- function(sf_input, method=1, verbose=T,scale_to=1){
+#https://satijalab.org/signac/reference/RunTFIDF.html
+#From Scott Furlan 
+  #sf_input - is size factor scaled counts matrix
+  
+  mat <- sf_input
+  row_sums <- Matrix::rowSums(mat)
+  col_sums <- Matrix::colSums(mat)
+  rn <- rownames(mat) #save for later as rownames are lost during different class conversions 
+  
+  if (method == 1) {
+    
+    #Adapted from Casanovich et al.
+    if(verbose) message("Computing Inverse Document Frequency")
+    idf   <- as(log(1 + ncol(mat) / row_sums), "sparseVector")
+    if(verbose) message("Computing TF-IDF Matrix")
+    tfidf <- as(Matrix::Diagonal(x = as.vector(idf)), "sparseMatrix") %*% 
+      mat
+    
+  }else if (method == 2) {
+    
+    #Adapted from Stuart et al.
+    if(verbose) message("Computing Inverse Document Frequency")
+    idf   <- as( ncol(mat) / row_sums, "sparseVector")
+    if(verbose) message("Computing TF-IDF Matrix")
+    tfidf <- as(Matrix::Diagonal(x = as.vector(idf)), "sparseMatrix") %*% 
+      mat
+    tfidf@x <- log((tfidf@x * scale_to) + 1)
+    
+  }else if (method == 3) {
+    
+    mat <- log(mat + 1) #mat@x <- log(mat@x + 1) this would require a sparesMatrix class input 
+    if(verbose) message("Computing Inverse Document Frequency")
+    idf <- as(log(1 + ncol(mat) / row_sums), "sparseVector")
+    if(verbose) message("Computing TF-IDF Matrix")
+    tfidf <- as(Matrix::Diagonal(x = as.vector(idf)), "sparseMatrix") %*% 
+      mat
+    
+  }else {
+    stop("LSIMethod unrecognized please select valid method!")
+  }
+  
+  
+  rownames(tfidf) <- rn
+  return(tfidf)
+  
+  
+}
+```
+
+
+```{r}
+# set.seed(1)
+# A = matrix(c(1,5,3,2), ncol = 4, nrow=4)
+# A
+# B = matrix(c(2,3,1,5), ncol = 4, nrow=4)
+# B
+# 
+# A * B #is the matrix of element by element products
+# A %*% B #is the matrix product https://www.mathsisfun.com/algebra/matrix-multiplying.html
+``` 
+
+
+```{r}
+#TFIDF TRANSFORMED Counts
+# Term Frequency - Inverse Document Frequency (TF-IDF) 
+# https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6101073/
+cell_total <- apply(cts_in, 2, sum)
+geomean <- exp(mean(log(cell_total)))
+sf <- cell_total/geomean
+sf.scaled <- t(t(cts_in)/sf)
+
+# head(sf.scaled[,1:5])
+dim(sf.scaled) # 18368  1061
+```
+
+```{r}
+tf_idf_matrices <- lapply(1:3, function(i) tf_idf_transform(sf_input=sf.scaled, method=i, verbose = F, scale_to = 10000))
+
+# lapply(tf_idf_matrices, dim)
+range(sf.scaled)
+lapply(tf_idf_matrices, range)
+```
+
+```{r}
+# Mean vs Dispersion Feature Selection 
+#Should this be normalized counts or the raw counts... Scott Furlan used raw counts and it results in > number of genes. 
+#So potentially this step is too stringent. 
+
+obj <- calc_dispersion(sf.scaled, removeOutliers = TRUE) #removes outlier genes/transcripts based on cooks distance
+genes_in <- get_selected_genes(select_genes(obj, top_n=NULL))
+plot_gene_dispersion(obj)
+length(genes_in) #3943
+```
+
+
+
+
+
+
+#UMAP Clustering 
+
+```{r}
+library(furrr)
+```
+
+```{r}
+# future::plan("multisession")
+
+tictoc::tic()
+
+UMAP_results_all <- lapply(1:3, function(i){
+  
+  UMAP_workflow(TFIDF_Matrix = tf_idf_matrices[[i]][genes_in,], 
+                            samples_vector = sample_info$USI,
+                            sample_info_df = sample_info,
+                            Columns_for_Plots = Cols,
+                            cc = cc, 
+                            min_dist=0.1,
+                            n_neighbors=15L,
+                            addl_color_vector=colors37,
+                            k2=12,
+                            res2=0.01)
+  
+  
+  
+})
+
+length(UMAP_results_all)
+names(UMAP_results_all) <- paste0("TFIDF_Method",1:3)
+tictoc::toc()
+
+# saveRDS(UMAP_results_all,"UMAP/TARGET_AML_UMAP_3TFIDFMethods_Results_8.21.20.RDS")
+```
+
+
+```{r}
+# future::plan("multisession")
+
+tictoc::tic()
+
+UMAP_results_fusions <- lapply(1:3, function(i){
+  
+  sample_info <- sample_info %>% 
+    filter(Subgroups != "None or Other")
+  
+  print(dim(sample_info))
+  UMAP_workflow(TFIDF_Matrix = tf_idf_matrices[[i]][genes_in,],
+                            samples_vector = sample_info$USI,
+                            sample_info_df = sample_info,
+                            Columns_for_Plots = Cols,
+                            cc = cc,
+                            min_dist=0.1,
+                            n_neighbors=15L,
+                            addl_color_vector=colors37,
+                            k2=12,
+                            res2=0.01)
+  
+})
+
+# length(UMAP_results_fusions)
+# names(UMAP_results_fusions) <- paste0("TFIDF_Method",1:3)
+
+tictoc::toc() #2185.785 sec elapsed. Jeez, this took 36 minutes. I need to get the paralell option to work..
+
+
+# saveRDS(UMAP_results_fusions,"UMAP/TARGET_AML_UMAP_FusionPos_3TFIDFMethods_Results_8.21.20.RDS")
+```
+
+
+
+
+
+#Examine Fusion+ Samples Results (N=593)
+
+##Method 1 
+
+```{r}
+# saveRDS(results,"TARGET_AML_1031_LSC17ValCohort_UMAP_withOtherAML_Results_8.21.20.RDS")
+```
+
+```{r}
+mf1 <- UMAP_results_fusions$TFIDF_Method1
+
+length(mf1$input_features) #3855
+```
+
+```{r fig.height=8, fig.width=6}
+mf1$Num_PCs
+grid.arrange(grobs=mf1$cluster_plots1)
+grid.arrange(grobs=mf1$cluster_plots2)
+```
+
+```{r fig.width=7, fig.height=7}
+mf1$umap_2D_scatter
+
+# ggsave(filename = "TARGET_AML_1031_LSC17ValCohort_UMAP_withOtherAML_2Dscatter_8.21.20.pdf",plot = m1$umap_2D_scatter$Subgroups,
+#        device = "pdf", height = 7, width = 7)
+
+```
+
+
+
+##Method 2
+
+```{r}
+mf2 <- UMAP_results_fusions$TFIDF_Method2
+
+length(mf2$input_features) 
+```
+
+```{r fig.height=8, fig.width=6}
+grid.arrange(grobs=mf2$cluster_plots2)
+```
+
+```{r fig.width=7, fig.height=7}
+mf2$umap_2D_scatter
+```
+
+
+
+##Method 3
+
+```{r}
+mf3 <- UMAP_results_fusions$TFIDF_Method3
+
+length(mf1$input_features) #18359
+```
+
+```{r fig.height=8, fig.width=6}
+grid.arrange(grobs=mf3$cluster_plots2)
+```
+
+```{r fig.width=7, fig.height=7}
+mf3$umap_2D_scatter
+```
+
+
+
+
+#Examine All Samples Results (N=1061)
+
+##Method 1 
+
+```{r}
+# saveRDS(results,"TARGET_AML_1031_LSC17ValCohort_UMAP_withOtherAML_Results_8.21.20.RDS")
+```
+
+```{r}
+m1 <- UMAP_results_all$TFIDF_Method1
+
+length(m1$input_features) #3893
+```
+
+
+```{r fig.height=10, fig.width=8}
+m1$Num_PCs
+grid.arrange(grobs=m1$cluster_plots1)
+# m1$cluster_plots2
+```
+
+```{r fig.width=7, fig.height=7}
+m1$umap_2D_scatter
+
+# ggsave(filename = "TARGET_AML_1031_LSC17ValCohort_UMAP_withOtherAML_2Dscatter_8.21.20.pdf",plot = m1$umap_2D_scatter$Subgroups, 
+#        device = "pdf", height = 7, width = 5)
+
+```
+
+
+
+#Method 2
+
+```{r}
+m2 <- UMAP_results_all$TFIDF_Method2
+
+length(m2$input_features) #3943
+```
+
+```{r fig.height=10, fig.width=8}
+m2$Num_PCs
+grid.arrange(grobs=m2$cluster_plots1)
+# m1$cluster_plots2
+```
+
+
+```{r fig.width=7, fig.height=7}
+m2$umap_2D_scatter
+```
+
+
+
+#Method 3
+
+```{r}
+m3 <- UMAP_results_all$TFIDF_Method3
+
+
+length(m1$input_features) #3893
+```
+
+
+```{r fig.height=10, fig.width=8}
+m3$Num_PCs
+grid.arrange(grobs=m3$cluster_plots1)
+# m1$cluster_plots2
+```
+
+
+```{r fig.width=7, fig.height=7}
+m3$umap_2D_scatter
+```
+
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
